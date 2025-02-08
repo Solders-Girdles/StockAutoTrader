@@ -3,9 +3,8 @@
 mq_util.py
 
 RabbitMQ Communication Utilities:
-- Provides helper functions for connecting and publishing messages
-  with retry logic and robust error handling.
-- All logs include explicit JSON fields for traceability.
+- Provides helper functions for connecting and publishing messages with retry logic and robust error handling.
+- All log entries include explicit JSON fields (timestamp, level, service, message, and optional correlation_id).
 """
 
 import os
