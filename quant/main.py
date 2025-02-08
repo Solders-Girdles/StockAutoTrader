@@ -3,7 +3,7 @@
 quant/main.py
 
 A robust multi-symbol moving average crossover strategy integrated with RabbitMQ,
-enhanced error handling, and optional Postgres logging.
+enhanced error handling, data schema validation, and optional Postgres logging.
 This script consumes market data from the "market_data" queue, validates and processes
 the data, applies configurable strategy logic (including MA crossover and optional RSI),
 and publishes trading signals to the "trade_signals" queue.
@@ -36,12 +36,42 @@ import traceback
 from datetime import datetime
 from collections import deque
 from typing import Dict, Any, Deque, Optional
+import sys
 
 import pika
 import psycopg2
 
-# Configure logging.
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+# Standard service name for logging.
+SERVICE_NAME = "Quant"
+
+# Configure basic logging (actual formatting is done in our helper function).
+logging.basicConfig(level=logging.INFO, format="%(message)s")
+
+
+def log_json(level: str, message: str, extra: Optional[Dict[str, Any]] = None):
+    """
+    Helper function to log JSON-formatted messages.
+    Standard fields include: timestamp, level, service, and message.
+    Optionally, extra fields (e.g., correlation_id) can be added.
+    """
+    if extra is None:
+        extra = {}
+    log_entry = {
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "level": level.upper(),
+        "service": SERVICE_NAME,
+        "message": message
+    }
+    log_entry.update(extra)
+    if level.upper() == "ERROR":
+        logging.error(json.dumps(log_entry))
+    elif level.upper() == "WARNING":
+        logging.warning(json.dumps(log_entry))
+    elif level.upper() == "DEBUG":
+        logging.debug(json.dumps(log_entry))
+    else:
+        logging.info(json.dumps(log_entry))
+
 
 # Read strategy parameters from environment variables.
 MA_SHORT = int(os.environ.get("MA_SHORT", "2"))
@@ -58,6 +88,9 @@ DB_PASS = os.environ.get("DB_PASS")
 DB_NAME = os.environ.get("DB_NAME")
 
 
+# ---------------------------
+# Core Analysis & Validation
+# ---------------------------
 class SymbolStrategy:
     """
     Strategy for a single symbol using configurable moving averages and RSI indicator.
@@ -66,10 +99,9 @@ class SymbolStrategy:
       - A long MA over the last MA_LONG prices.
       - An RSI over the last RSI_PERIOD price changes (if enough data).
 
-    The strategy generates a BUY or SELL signal when the short MA crosses over the long MA,
+    Generates a BUY or SELL signal when the short MA crosses the long MA,
     optionally confirmed by an RSI condition.
     """
-
     def __init__(self, symbol: str, ma_short: int, ma_long: int, rsi_period: int,
                  use_rsi: bool, rsi_buy: float, rsi_sell: float) -> None:
         self.symbol = symbol
@@ -79,26 +111,30 @@ class SymbolStrategy:
         self.use_rsi = use_rsi
         self.rsi_buy_threshold = rsi_buy
         self.rsi_sell_threshold = rsi_sell
-        # Store enough prices for both MA and RSI calculations.
+        # Buffer size covers both MA and RSI needs.
         self.buffer_size = max(ma_long, rsi_period + 1)
         self.prices: Deque[float] = deque(maxlen=self.buffer_size)
         self.last_signal: str = ""
 
     def update(self, timestamp: str, price: float) -> Dict[str, Any]:
         """
-        Update the strategy with a new price, compute indicators, and determine if a new signal is generated.
+        Update with a new price, compute indicators, and determine if a new signal is generated.
 
-        Args:
-            timestamp (str): The timestamp of the data point.
-            price (float): The latest price.
-
-        Returns:
-            Dict[str, Any]: A dict containing the signal and indicator values, or an empty dict if no new signal.
+        Returns a dictionary with keys:
+            - symbol (str)
+            - timestamp (str, ISO8601)
+            - price (float)
+            - ma_short (float)
+            - ma_long (float)
+            - rsi (float, optional)
+            - signal_type (str, legacy)
+            - action (str)
+            - signal (str)
+            - confidence (float)
         """
         self.prices.append(price)
         result: Dict[str, Any] = {}
         if len(self.prices) < self.ma_long:
-            # Not enough data to compute moving averages.
             return result
 
         prices_list = list(self.prices)
@@ -107,7 +143,6 @@ class SymbolStrategy:
         ma_short_value = sum(short_prices) / self.ma_short
         ma_long_value = sum(long_prices) / self.ma_long
 
-        # Determine MA-based signal.
         if ma_short_value > ma_long_value:
             ma_signal = "BUY"
         elif ma_short_value < ma_long_value:
@@ -115,7 +150,6 @@ class SymbolStrategy:
         else:
             ma_signal = "HOLD"
 
-        # Compute RSI if enough data is available.
         rsi_value: Optional[float] = None
         if len(prices_list) >= self.rsi_period + 1:
             diffs = [prices_list[i] - prices_list[i - 1] for i in range(1, len(prices_list))]
@@ -130,19 +164,17 @@ class SymbolStrategy:
                 rs = avg_gain / avg_loss
                 rsi_value = 100 - (100 / (1 + rs))
 
-        # Combine MA and RSI signals.
         final_signal = ma_signal
         if self.use_rsi and rsi_value is not None:
-            # For a BUY signal, require RSI to be below the buy threshold.
-            # For a SELL signal, require RSI to be above the sell threshold.
             if ma_signal == "BUY" and rsi_value >= self.rsi_buy_threshold:
                 final_signal = "HOLD"
             elif ma_signal == "SELL" and rsi_value <= self.rsi_sell_threshold:
                 final_signal = "HOLD"
 
-        # Only output a signal if it is not HOLD and has changed.
+        # Only output a new signal if not HOLD and different from the last signal.
         if final_signal != "HOLD" and final_signal != self.last_signal:
             self.last_signal = final_signal
+            # Include both "action" and "signal" keys for RiskOps.
             result = {
                 "symbol": self.symbol,
                 "timestamp": timestamp,
@@ -150,16 +182,182 @@ class SymbolStrategy:
                 "ma_short": round(ma_short_value, 2),
                 "ma_long": round(ma_long_value, 2),
                 "rsi": round(rsi_value, 2) if rsi_value is not None else None,
-                "action": final_signal
+                "signal_type": final_signal,
+                "action": final_signal,
+                "signal": final_signal,
+                "confidence": 1.0  # Default confidence for strategy-generated signals.
             }
         return result
 
 
+def process_market_data(data: dict) -> dict:
+    """
+    Validate and (if needed) correct incoming market data from Dataflow.
+
+    Expected keys:
+      - symbol (str, required and non-empty)
+      - price (int/float, required)
+      - timestamp (str, optional; default: current UTC time)
+      - volume (int/float, optional; default: 0)
+
+    Logs warnings (in JSON format) if optional fields are missing or malformed.
+    """
+    # Validate required fields.
+    if "symbol" not in data or not data.get("symbol") or not str(data["symbol"]).strip():
+        err = {"error": "Missing or empty required field: 'symbol'"}
+        log_json("ERROR", "Data validation error", extra=err)
+        raise ValueError(err)
+    if "price" not in data:
+        err = {"error": "Missing required field: 'price'"}
+        log_json("ERROR", "Data validation error", extra=err)
+        raise ValueError(err)
+    try:
+        symbol = str(data["symbol"]).strip()
+        price = float(data["price"])
+    except (ValueError, TypeError) as e:
+        log_json("ERROR", "Invalid type for 'symbol' or 'price'", extra={
+            "exception": str(e),
+            "stack_trace": traceback.format_exc()
+        })
+        raise
+
+    # Process optional fields.
+    timestamp = data.get("timestamp")
+    if not timestamp:
+        timestamp = datetime.utcnow().isoformat() + "Z"
+        log_json("WARNING", "Missing timestamp; defaulting to current time", extra={"default_timestamp": timestamp})
+    volume = data.get("volume")
+    if volume is None:
+        volume = 0
+        log_json("WARNING", "Missing volume; defaulting to 0")
+    else:
+        try:
+            volume = float(volume)
+        except (ValueError, TypeError) as e:
+            log_json("ERROR", "Invalid type for 'volume'", extra={
+                "exception": str(e),
+                "stack_trace": traceback.format_exc()
+            })
+            volume = 0
+
+    processed_data = {
+        "symbol": symbol,
+        "timestamp": timestamp,
+        "price": price,
+        "volume": volume
+    }
+    log_json("INFO", "Processed market data", extra={"data": processed_data})
+    return processed_data
+
+
+def compute_signal(data: dict) -> dict:
+    """
+    Compute a trade signal using a simple strategy:
+      - If price is below 125, signal is "BUY"; otherwise, "SELL".
+
+    Returns a signal dict containing:
+      symbol, timestamp, signal_type, action, signal, price, and confidence.
+    Includes a retry mechanism and returns a fallback signal if needed.
+    """
+    max_retries = 3
+    for attempt in range(1, max_retries + 1):
+        try:
+            price = data["price"]
+            signal_type = "BUY" if price < 125 else "SELL"
+            signal = {
+                "symbol": data["symbol"],
+                "timestamp": datetime.utcnow().isoformat() + "Z",
+                "signal_type": signal_type,
+                "action": signal_type,
+                "signal": signal_type,
+                "price": price,
+                "confidence": round(random.uniform(0.7, 1.0), 2)
+            }
+            log_json("INFO", "Computed signal", extra={"signal": signal})
+            return signal
+        except KeyError as ke:
+            log_json("ERROR", "Missing key during signal computation", extra={
+                "exception": str(ke),
+                "stack_trace": traceback.format_exc(),
+                "attempt": attempt
+            })
+            break
+        except Exception as e:
+            log_json("ERROR", "Error computing signal", extra={
+                "exception": str(e),
+                "stack_trace": traceback.format_exc(),
+                "attempt": attempt
+            })
+            time.sleep(0.5 * attempt)
+    fallback_signal = {
+        "symbol": data.get("symbol", "UNKNOWN"),
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "signal_type": "HOLD",
+        "action": "HOLD",
+        "signal": "HOLD",
+        "price": data.get("price", 0.0),
+        "confidence": 0.0
+    }
+    log_json("INFO", "Returning fallback signal", extra={"signal": fallback_signal})
+    return fallback_signal
+
+
+def publish_trade_signal(signal: dict) -> None:
+    """
+    Publish the trade signal to the RabbitMQ 'trade_signals' queue.
+    Implements exponential backoff for transient errors.
+
+    The published message includes:
+      - symbol, timestamp, signal_type, action, signal, price, confidence,
+      - and optionally ma_short, ma_long, rsi.
+    """
+    rabbitmq_host = os.environ.get("RABBITMQ_HOST", "localhost")
+    rabbitmq_user = os.environ.get("RABBITMQ_USER", "guest")
+    rabbitmq_pass = os.environ.get("RABBITMQ_PASS", "guest")
+    message = json.dumps(signal)
+    max_retries = 3
+    delay = 1
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            credentials = pika.PlainCredentials(rabbitmq_user, rabbitmq_pass)
+            parameters = pika.ConnectionParameters(host=rabbitmq_host, credentials=credentials)
+            connection = pika.BlockingConnection(parameters)
+            channel = connection.channel()
+            channel.queue_declare(queue="trade_signals", durable=True)
+            channel.basic_publish(
+                exchange="",
+                routing_key="trade_signals",
+                body=message,
+                properties=pika.BasicProperties(delivery_mode=2)
+            )
+            log_json("INFO", "Published trade signal", extra={"signal": signal})
+            connection.close()
+            return
+        except (pika.exceptions.AMQPConnectionError, pika.exceptions.AMQPChannelError) as e:
+            log_json("ERROR", "RabbitMQ network error while publishing signal", extra={
+                "exception": str(e),
+                "stack_trace": traceback.format_exc(),
+                "attempt": attempt
+            })
+        except Exception as e:
+            log_json("ERROR", "Unexpected error while publishing trade signal", extra={
+                "exception": str(e),
+                "stack_trace": traceback.format_exc(),
+                "attempt": attempt
+            })
+        time.sleep(delay)
+        delay *= 2
+    log_json("ERROR", "Failed to publish trade signal after retries", extra={"signal": signal})
+
+
+# ---------------------------
+# Optional Postgres Logging
+# ---------------------------
 class PostgresLogger:
     """
-    Optionally logs trading signals and performance metrics to a Postgres table "quant_signals".
+    Logs trading signals and performance metrics to the Postgres table "quant_signals".
     """
-
     def __init__(self, host: str, user: str, password: str, dbname: str) -> None:
         self.conn = psycopg2.connect(host=host, user=user, password=password, dbname=dbname)
         self.create_table()
@@ -203,10 +401,7 @@ class PostgresLogger:
 
 def get_rabbitmq_connection() -> pika.BlockingConnection:
     """
-    Connects to RabbitMQ using environment variables.
-
-    Returns:
-        pika.BlockingConnection: The established connection.
+    Connect to RabbitMQ using environment variables.
     """
     rabbitmq_host = os.environ.get("RABBITMQ_HOST", "localhost")
     rabbitmq_user = os.environ.get("RABBITMQ_USER", "guest")
@@ -216,231 +411,34 @@ def get_rabbitmq_connection() -> pika.BlockingConnection:
     return pika.BlockingConnection(parameters)
 
 
-def process_market_data(data: dict) -> dict:
-    """
-    Process and validate incoming market data.
-
-    The market data dictionary must contain the following keys:
-      - symbol: str
-      - timestamp: str
-      - price: (int or float)
-      - volume: (int or float)
-
-    This function logs the received data and returns a validated dictionary.
-    Detailed error information (including stack traces) is logged as JSON.
-
-    Args:
-        data (dict): Incoming market data.
-
-    Returns:
-        dict: Processed market data.
-    """
-    required_keys = ["symbol", "timestamp", "price", "volume"]
-    for key in required_keys:
-        if key not in data:
-            error_msg = {"error": f"Missing required market data key: '{key}'"}
-            logging.error(json.dumps(error_msg))
-            raise ValueError(error_msg)
-    try:
-        symbol = str(data["symbol"])
-        timestamp = str(data["timestamp"])
-        price = float(data["price"])
-        volume = float(data["volume"])
-    except ValueError as ve:
-        logging.error(
-            json.dumps({
-                "error": "Invalid data type in market data",
-                "exception": str(ve),
-                "stack_trace": traceback.format_exc()
-            })
-        )
-        raise ValueError(f"Invalid data type in market data: {ve}")
-    except TypeError as te:
-        logging.error(
-            json.dumps({
-                "error": "Invalid data type in market data",
-                "exception": str(te),
-                "stack_trace": traceback.format_exc()
-            })
-        )
-        raise ValueError(f"Invalid data type in market data: {te}")
-
-    processed_data = {
-        "symbol": symbol,
-        "timestamp": timestamp,
-        "price": price,
-        "volume": volume
-    }
-    logging.info(json.dumps({"message": "Processed market data", "data": processed_data}))
-    return processed_data
-
-
-def compute_signal(data: dict) -> dict:
-    """
-    Compute a trade signal from processed market data using a simple strategy.
-
-    Strategy:
-      - If the price is below 125, signal_type is "BUY".
-      - Otherwise, signal_type is "SELL".
-
-    The generated signal dictionary contains:
-      - symbol: str (from market data)
-      - timestamp: str (current UTC time in ISO8601 format)
-      - signal_type: str ("BUY" or "SELL")
-      - price: float (from market data)
-      - confidence: float (random value between 0.7 and 1.0)
-
-    Robust error handling with a retry mechanism is applied.
-    Detailed error information is logged in JSON format.
-
-    Args:
-        data (dict): Processed market data.
-
-    Returns:
-        dict: Trade signal.
-    """
-    max_retries = 3
-    for attempt in range(1, max_retries + 1):
-        try:
-            price = data["price"]
-            signal_type = "BUY" if price < 125 else "SELL"
-            signal = {
-                "symbol": data["symbol"],
-                "timestamp": datetime.utcnow().isoformat() + "Z",
-                "signal_type": signal_type,
-                "price": price,
-                "confidence": round(random.uniform(0.7, 1.0), 2)
-            }
-            logging.info(json.dumps({"message": "Computed signal successfully", "signal": signal}))
-            return signal
-        except KeyError as ke:
-            logging.error(
-                json.dumps({
-                    "error": "Missing key in market data during signal computation",
-                    "exception": str(ke),
-                    "stack_trace": traceback.format_exc(),
-                    "attempt": attempt
-                })
-            )
-            break  # No point retrying if a required key is missing.
-        except Exception as e:
-            logging.error(
-                json.dumps({
-                    "error": "Error computing signal",
-                    "exception": str(e),
-                    "stack_trace": traceback.format_exc(),
-                    "attempt": attempt
-                })
-            )
-            time.sleep(0.5 * attempt)  # Exponential backoff
-
-    # Fallback: return a default signal indicating no actionable decision.
-    fallback_signal = {
-        "symbol": data.get("symbol", "UNKNOWN"),
-        "timestamp": datetime.utcnow().isoformat() + "Z",
-        "signal_type": "HOLD",
-        "price": data.get("price", 0.0),
-        "confidence": 0.0
-    }
-    logging.info(json.dumps({"message": "Returning fallback signal", "fallback_signal": fallback_signal}))
-    return fallback_signal
-
-
-def publish_trade_signal(signal: dict) -> None:
-    """
-    Publish the trade signal to the RabbitMQ 'trade_signals' queue.
-
-    The function reads the RabbitMQ connection details from environment variables:
-      - RABBITMQ_HOST, RABBITMQ_USER, RABBITMQ_PASS
-
-    It encodes the signal as JSON and publishes it with persistent delivery mode.
-    Network-related errors are caught with specific exception handling, and a simple
-    retry logic with exponential backoff is applied.
-
-    Args:
-        signal (dict): The trade signal to publish.
-    """
-    rabbitmq_host = os.environ.get("RABBITMQ_HOST", "localhost")
-    rabbitmq_user = os.environ.get("RABBITMQ_USER", "guest")
-    rabbitmq_pass = os.environ.get("RABBITMQ_PASS", "guest")
-    message = json.dumps(signal)
-
-    max_retries = 3
-    delay = 1  # Initial delay in seconds
-
-    for attempt in range(1, max_retries + 1):
-        try:
-            credentials = pika.PlainCredentials(rabbitmq_user, rabbitmq_pass)
-            parameters = pika.ConnectionParameters(host=rabbitmq_host, credentials=credentials)
-            connection = pika.BlockingConnection(parameters)
-            channel = connection.channel()
-            channel.queue_declare(queue="trade_signals", durable=True)
-
-            channel.basic_publish(
-                exchange="",
-                routing_key="trade_signals",
-                body=message,
-                properties=pika.BasicProperties(delivery_mode=2)  # persistent message
-            )
-            logging.info(json.dumps({"message": "Successfully published trade signal", "signal": signal}))
-            connection.close()
-            return
-        except (pika.exceptions.AMQPConnectionError, pika.exceptions.AMQPChannelError) as e:
-            logging.error(
-                json.dumps({
-                    "error": "RabbitMQ network-related error while publishing trade signal",
-                    "exception": str(e),
-                    "stack_trace": traceback.format_exc(),
-                    "attempt": attempt
-                })
-            )
-        except Exception as e:
-            logging.error(
-                json.dumps({
-                    "error": "Unexpected error while publishing trade signal",
-                    "exception": str(e),
-                    "stack_trace": traceback.format_exc(),
-                    "attempt": attempt
-                })
-            )
-        time.sleep(delay)
-        delay *= 2  # Exponential backoff
-
-    # If all attempts fail, log the final error.
-    logging.error(json.dumps({"error": "Failed to publish trade signal after multiple attempts", "signal": signal}))
-
-
+# ---------------------------
+# Main Consumer Logic
+# ---------------------------
 def main() -> None:
-    logging.info("Starting Quant multi-symbol strategy...")
-
-    # Establish connection to RabbitMQ.
+    log_json("INFO", "Starting Quant multi-symbol strategy...")
     connection = get_rabbitmq_connection()
     channel = connection.channel()
     channel.queue_declare(queue="market_data", durable=True)
     channel.queue_declare(queue="trade_signals", durable=True)
 
-    # Initialize Postgres logger if DB parameters are provided.
     postgres_logger: Optional[PostgresLogger] = None
     if DB_HOST and DB_USER and DB_PASS and DB_NAME:
         try:
             postgres_logger = PostgresLogger(DB_HOST, DB_USER, DB_PASS, DB_NAME)
-            logging.info("Connected to Postgres for signal logging.")
+            log_json("INFO", "Connected to Postgres for signal logging.")
         except Exception:
-            logging.exception("Failed to connect to Postgres. Proceeding without DB logging.")
+            log_json("ERROR", "Failed to connect to Postgres; continuing without DB logging", extra={"stack_trace": traceback.format_exc()})
 
-    # Dictionary to hold strategy instances per symbol.
     strategies: Dict[str, SymbolStrategy] = {}
 
     def on_message(ch, method, properties, body) -> None:
         try:
             raw_data = json.loads(body)
-            # Validate and process market data.
             processed_data = process_market_data(raw_data)
             symbol = processed_data["symbol"]
             timestamp = processed_data["timestamp"]
             price = processed_data["price"]
 
-            # Use the multi-symbol strategy.
             if symbol not in strategies:
                 strategies[symbol] = SymbolStrategy(
                     symbol=symbol,
@@ -452,38 +450,140 @@ def main() -> None:
                     rsi_sell=RSI_SELL_THRESHOLD
                 )
             signal = strategies[symbol].update(timestamp, price)
-            # If no signal from the strategy, use the fallback compute_signal.
             if not signal:
                 signal = compute_signal(processed_data)
-            # Only publish if there is an actionable signal.
             if signal and signal.get("signal_type") != "HOLD":
                 publish_trade_signal(signal)
-                logging.info(f"Published signal: {json.dumps(signal)}")
+                log_json("INFO", "Published signal", extra={"signal": signal})
                 if postgres_logger:
                     try:
                         postgres_logger.log_signal(signal)
-                        logging.debug("Signal logged to Postgres.")
+                        log_json("DEBUG", "Signal logged to Postgres")
                     except Exception:
-                        logging.exception("Failed to log signal to Postgres.")
+                        log_json("ERROR", "Failed to log signal to Postgres", extra={"stack_trace": traceback.format_exc()})
         except Exception:
-            logging.exception("Error processing market data message.")
+            log_json("ERROR", "Error processing market data message", extra={"stack_trace": traceback.format_exc()})
         finally:
             ch.basic_ack(delivery_tag=method.delivery_tag)
 
     channel.basic_consume(queue="market_data", on_message_callback=on_message)
-    logging.info("Waiting for market data. To exit press CTRL+C")
-
+    log_json("INFO", "Waiting for market data. To exit press CTRL+C")
     try:
         channel.start_consuming()
     except KeyboardInterrupt:
-        logging.info("Interrupted by user. Shutting down...")
+        log_json("INFO", "Interrupted by user; shutting down...")
     finally:
         channel.stop_consuming()
         connection.close()
         if postgres_logger:
             postgres_logger.close()
-        logging.info("Shutdown complete.")
+        log_json("INFO", "Shutdown complete.")
 
+
+# ---------------------------
+# Unit Testing
+# ---------------------------
+import unittest
+
+class TestQuantAnalysis(unittest.TestCase):
+    def test_process_market_data_valid(self):
+        data = {
+            "symbol": "AAPL",
+            "timestamp": "2025-02-07T12:00:00Z",
+            "price": 120.5,
+            "volume": 1000
+        }
+        processed = process_market_data(data)
+        self.assertEqual(processed["symbol"], "AAPL")
+        self.assertEqual(processed["price"], 120.5)
+        self.assertEqual(processed["volume"], 1000)
+        self.assertEqual(processed["timestamp"], "2025-02-07T12:00:00Z")
+
+    def test_process_market_data_missing_optional(self):
+        data = {
+            "symbol": "GOOG",
+            "price": 1500.0
+        }
+        processed = process_market_data(data)
+        self.assertEqual(processed["symbol"], "GOOG")
+        self.assertEqual(processed["price"], 1500.0)
+        self.assertEqual(processed["volume"], 0)
+        self.assertTrue("Z" in processed["timestamp"])  # Default timestamp provided.
+
+    def test_process_market_data_missing_required(self):
+        data = {
+            "timestamp": "2025-02-07T12:00:00Z",
+            "price": 100.0,
+            "volume": 500
+        }
+        with self.assertRaises(ValueError):
+            process_market_data(data)
+
+    def test_process_market_data_empty_symbol(self):
+        data = {
+            "symbol": "   ",
+            "price": 100.0,
+            "volume": 500
+        }
+        with self.assertRaises(ValueError):
+            process_market_data(data)
+
+    def test_compute_signal_buy(self):
+        data = {
+            "symbol": "MSFT",
+            "timestamp": "2025-02-07T12:00:00Z",
+            "price": 120.0,
+            "volume": 200
+        }
+        signal = compute_signal(data)
+        self.assertEqual(signal["signal_type"], "BUY")
+        self.assertEqual(signal["action"], "BUY")
+        self.assertEqual(signal["signal"], "BUY")
+        self.assertIn("confidence", signal)
+
+    def test_compute_signal_sell(self):
+        data = {
+            "symbol": "IBM",
+            "timestamp": "2025-02-07T12:00:00Z",
+            "price": 130.0,
+            "volume": 300
+        }
+        signal = compute_signal(data)
+        self.assertEqual(signal["signal_type"], "SELL")
+        self.assertEqual(signal["action"], "SELL")
+        self.assertEqual(signal["signal"], "SELL")
+        self.assertIn("confidence", signal)
+
+    def test_symbol_strategy_update(self):
+        strategy = SymbolStrategy("TEST", ma_short=2, ma_long=3, rsi_period=2,
+                                    use_rsi=False, rsi_buy=30, rsi_sell=70)
+        signals = []
+        timestamps = [datetime.utcnow().isoformat() + "Z" for _ in range(3)]
+        for price, ts in zip([100, 101, 102], timestamps):
+            sig = strategy.update(ts, price)
+            if sig:
+                signals.append(sig)
+        self.assertTrue(len(signals) >= 1)
+        for sig in signals:
+            self.assertIn("signal_type", sig)
+            self.assertIn("action", sig)
+            self.assertIn("signal", sig)
+            self.assertIn("confidence", sig)
+
+    def test_extreme_price_values(self):
+        data = {
+            "symbol": "EXTREME",
+            "timestamp": "2025-02-07T12:00:00Z",
+            "price": 1e9,  # Extremely high price.
+            "volume": 1000
+        }
+        processed = process_market_data(data)
+        signal = compute_signal(processed)
+        self.assertEqual(signal["signal_type"], "SELL")
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) > 1 and sys.argv[1] == "test":
+        sys.argv.pop(1)
+        unittest.main()
+    else:
+        main()
