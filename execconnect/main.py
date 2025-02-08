@@ -8,8 +8,7 @@ approved trades. It simulates order execution with enhanced fill logic
 with a real paper broker (e.g., Alpaca) if API credentials are provided.
 
 Approved trade messages are consumed from the "approved_trades" queue.
-Each trade execution event (whether a full fill, partial fill, or rejection)
-is logged in the Postgres "trades" table.
+Each trade execution event is logged in the Postgres "trades" table.
 
 Environment Variables:
   RabbitMQ:
@@ -24,7 +23,9 @@ import os
 import json
 import uuid
 import random
+import time
 import logging
+import traceback
 from datetime import datetime
 from typing import Dict, Any, List
 
@@ -57,7 +58,7 @@ ALPACA_BASE_URL = os.environ.get("ALPACA_BASE_URL", "https://paper-api.alpaca.ma
 
 
 # ---------------------------
-# Trade Execution Simulation
+# Existing Trade Execution Simulation (Partial Fill, etc.)
 # ---------------------------
 def simulate_paper_trade_execution(trade: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
@@ -193,7 +194,6 @@ def broker_place_order(trade: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
     if ALPACA_API_KEY:
         try:
-            # Import the Alpaca Trade API library (ensure it's installed)
             import alpaca_trade_api as tradeapi
         except ImportError:
             logger.error("alpaca_trade_api library not installed. Falling back to simulation.")
@@ -201,7 +201,6 @@ def broker_place_order(trade: Dict[str, Any]) -> List[Dict[str, Any]]:
 
         try:
             api = tradeapi.REST(ALPACA_API_KEY, ALPACA_SECRET_KEY, base_url=ALPACA_BASE_URL)
-            # Submit a limit order; this is a simplified example.
             order = api.submit_order(
                 symbol=trade['symbol'],
                 qty=trade['quantity'],
@@ -210,10 +209,9 @@ def broker_place_order(trade: Dict[str, Any]) -> List[Dict[str, Any]]:
                 limit_price=trade['price'],
                 time_in_force='gtc'
             )
-            # In a real scenario, you would subscribe to order updates to handle partial fills.
             execution_event = {
                 "order_id": order.id,
-                "status": order.status.upper(),  # e.g., "FILLED", "PARTIALLY_FILLED"
+                "status": order.status.upper(),
                 "filled_quantity": int(order.filled_qty),
                 "avg_price": float(order.filled_avg_price) if order.filled_avg_price else trade['price'],
                 "timestamp": datetime.utcnow().isoformat(),
@@ -224,7 +222,6 @@ def broker_place_order(trade: Dict[str, Any]) -> List[Dict[str, Any]]:
             logger.error("Error calling Alpaca API: %s", str(e))
             raise
     else:
-        # Fallback to simulation if no real broker integration is configured.
         return simulate_paper_trade_execution(trade)
 
 
@@ -251,6 +248,145 @@ def place_order(trade: Dict[str, Any]) -> List[Dict[str, Any]]:
     except Exception as e:
         logger.error("Error during order placement: %s", str(e))
         raise
+
+
+# ---------------------------
+# New: Enhanced Trade Execution and Logging Functions
+# ---------------------------
+def execute_trade(trade: Dict) -> Dict:
+    """
+    Simulate executing an approved trade with enhanced error handling and retry logic.
+
+    This function accepts a trade dictionary with keys including:
+        - symbol, timestamp, action, price, quantity, risk_approved.
+
+    It attempts to simulate trade execution by:
+        - Generating a unique trade_id.
+        - Setting a status ("SUCCESS" or "FAILED") based on risk approval and randomness.
+        - Recording the execution time (current UTC time in ISO8601).
+
+    The execution simulation is wrapped in a retry mechanism with exponential backoff for
+    network-related errors (e.g., pika.exceptions.AMQPConnectionError, AMQPChannelError).
+    Each attempt is logged using structured JSON logs.
+
+    Returns:
+        dict: Execution details including trade_id, status, execution_time, and echoed trade fields.
+    """
+    max_retries = 3
+    attempt = 1
+
+    while attempt <= max_retries:
+        try:
+            log_info = {
+                "timestamp": datetime.utcnow().isoformat(),
+                "service": "ExecConnect",
+                "level": "INFO",
+                "message": f"Attempt {attempt}: Executing trade",
+                "trade": trade
+            }
+            print(json.dumps(log_info))
+
+            trade_id = str(uuid.uuid4())
+            risk_approved = trade.get("risk_approved", False)
+            if not risk_approved:
+                status = "FAILED"
+            else:
+                status = random.choice(["SUCCESS", "FAILED"])
+
+            execution_time = datetime.utcnow().isoformat()
+            execution_result = {
+                "trade_id": trade_id,
+                "status": status,
+                "execution_time": execution_time,
+                "symbol": trade.get("symbol"),
+                "action": trade.get("action"),
+                "price": trade.get("price"),
+                "quantity": trade.get("quantity")
+            }
+
+            log_info = {
+                "timestamp": datetime.utcnow().isoformat(),
+                "service": "ExecConnect",
+                "level": "INFO",
+                "message": "Trade execution successful",
+                "execution_result": execution_result
+            }
+            print(json.dumps(log_info))
+            return execution_result
+
+        except (pika.exceptions.AMQPConnectionError, pika.exceptions.AMQPChannelError) as e:
+            delay = 2 ** attempt
+            log_error = {
+                "timestamp": datetime.utcnow().isoformat(),
+                "service": "ExecConnect",
+                "level": "ERROR",
+                "message": f"Network error on attempt {attempt}: {str(e)}",
+                "stack_trace": traceback.format_exc(),
+                "retry_delay": delay
+            }
+            print(json.dumps(log_error))
+            time.sleep(delay)
+            attempt += 1
+
+        except Exception as e:
+            log_error = {
+                "timestamp": datetime.utcnow().isoformat(),
+                "service": "ExecConnect",
+                "level": "ERROR",
+                "message": f"Unexpected error executing trade: {str(e)}",
+                "stack_trace": traceback.format_exc()
+            }
+            print(json.dumps(log_error))
+            raise
+
+    final_result = {
+        "trade_id": "N/A",
+        "status": "FAILED",
+        "execution_time": datetime.utcnow().isoformat(),
+        "symbol": trade.get("symbol"),
+        "action": trade.get("action"),
+        "price": trade.get("price"),
+        "quantity": trade.get("quantity")
+    }
+    log_error = {
+        "timestamp": datetime.utcnow().isoformat(),
+        "service": "ExecConnect",
+        "level": "ERROR",
+        "message": "All retry attempts failed for executing trade",
+        "final_result": final_result
+    }
+    print(json.dumps(log_error))
+    return final_result
+
+
+def log_trade_execution(execution_result: Dict) -> None:
+    """
+    Log the trade execution details with robust error handling.
+
+    In production this might write to a DB, but here we use structured JSON logging.
+    If any error occurs during logging, it is caught and logged as a JSON error message.
+
+    Parameters:
+        execution_result (dict): The trade execution details.
+    """
+    try:
+        log_info = {
+            "timestamp": datetime.utcnow().isoformat(),
+            "service": "ExecConnect",
+            "level": "INFO",
+            "message": "Logging trade execution",
+            "execution_result": execution_result
+        }
+        print(json.dumps(log_info))
+    except Exception as e:
+        log_error = {
+            "timestamp": datetime.utcnow().isoformat(),
+            "service": "ExecConnect",
+            "level": "ERROR",
+            "message": f"Failed to log trade execution: {str(e)}",
+            "stack_trace": traceback.format_exc()
+        }
+        print(json.dumps(log_error))
 
 
 # ---------------------------
@@ -309,7 +445,6 @@ def insert_trade_update(conn, trade_update: Dict[str, Any]) -> None:
     INSERT INTO trades (order_id, symbol, status, filled_quantity, avg_price, execution_timestamp, remaining_quantity)
     VALUES (%s, %s, %s, %s, %s, %s, %s);
     """
-    # Determine symbol: if nested trade details exist, use them.
     symbol = trade_update.get("trade", {}).get("symbol") or trade_update.get("symbol", "UNKNOWN")
     order_id = trade_update.get("order_id")
     status = trade_update.get("status")
@@ -331,8 +466,8 @@ def insert_trade_update(conn, trade_update: Dict[str, Any]) -> None:
 def process_message(ch, method, properties, body, db_conn):
     """
     Callback to process messages from RabbitMQ.
-    Consumes an approved trade, places the order (via simulation or broker API),
-    and logs each execution event in Postgres.
+    Consumes an approved trade, executes the trade using enhanced logic,
+    logs the trade execution, and stores the result in Postgres.
 
     Parameters:
         ch: RabbitMQ channel.
@@ -345,12 +480,14 @@ def process_message(ch, method, properties, body, db_conn):
         message = json.loads(body.decode())
         logger.info("Received approved trade: %s", message)
 
-        # Place the order and obtain one or more execution events.
-        execution_updates = place_order(message)
+        # Execute trade with enhanced error handling and retries.
+        execution_result = execute_trade(message)
 
-        # Log each execution event in the DB.
-        for update in execution_updates:
-            insert_trade_update(db_conn, update)
+        # Log the trade execution using robust structured JSON logging.
+        log_trade_execution(execution_result)
+
+        # Optionally insert the execution result into the DB.
+        insert_trade_update(db_conn, execution_result)
 
         # Acknowledge the message.
         ch.basic_ack(delivery_tag=method.delivery_tag)

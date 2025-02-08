@@ -32,14 +32,30 @@ import logging
 import requests
 import pika
 import psycopg2
+from pythonjsonlogger import jsonlogger
 
-# --- Logging Configuration ---
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
+# --- Structured JSON Logging Configuration ---
 logger = logging.getLogger("DataFlow")
+logger.setLevel(logging.INFO)
+
+# Create a stream handler that outputs to stdout
+stream_handler = logging.StreamHandler()
+
+# Configure the JSON formatter to output the required fields
+formatter = jsonlogger.JsonFormatter(
+    fmt='%(asctime)s %(name)s %(levelname)s %(message)s',
+    rename_fields={
+        'asctime': 'timestamp',
+        'name': 'service',
+        'levelname': 'level',
+        'message': 'message'
+    }
+)
+stream_handler.setFormatter(formatter)
+
+# Clear any existing handlers and attach our JSON-formatted stream handler
+logger.handlers = []
+logger.addHandler(stream_handler)
 
 # --- Environment Variables ---
 POLYGON_API_KEY = os.environ.get("POLYGON_API_KEY")  # For real data
