@@ -2,17 +2,22 @@
 """
 execconnect/main.py
 
-This production-ready script integrates with RabbitMQ and Postgres.
-It consumes approved trades from the "approved_trades" queue, simulates
-an order execution (mock/paper trading), and logs the resulting execution
-update into a Postgres "trades" table.
+This production-ready script integrates with RabbitMQ and Postgres to process
+approved trades. It simulates order execution with enhanced fill logic
+(including partial fills, full fills, and rejections) and optionally integrates
+with a real paper broker (e.g., Alpaca) if API credentials are provided.
+
+Approved trade messages are consumed from the "approved_trades" queue.
+Each trade execution event (whether a full fill, partial fill, or rejection)
+is logged in the Postgres "trades" table.
 
 Environment Variables:
-  - RabbitMQ: RABBITMQ_HOST, RABBITMQ_USER, RABBITMQ_PASS
-  - Postgres:  DB_HOST, DB_USER, DB_PASS, DB_NAME
-
-In the future, the simulate_paper_trade_execution() function can be replaced
-with real API calls (e.g., to Alpaca).
+  RabbitMQ:
+    - RABBITMQ_HOST, RABBITMQ_USER, RABBITMQ_PASS
+  Postgres:
+    - DB_HOST, DB_USER, DB_PASS, DB_NAME
+  Broker (Optional - for real integration with Alpaca):
+    - ALPACA_API_KEY, ALPACA_SECRET_KEY, ALPACA_BASE_URL
 """
 
 import os
@@ -21,7 +26,7 @@ import uuid
 import random
 import logging
 from datetime import datetime
-from typing import Dict, Any
+from typing import Dict, Any, List
 
 import pika
 import psycopg2
@@ -45,36 +50,45 @@ DB_USER = os.environ.get("DB_USER", "postgres")
 DB_PASS = os.environ.get("DB_PASS", "")
 DB_NAME = os.environ.get("DB_NAME", "trading")
 
+# Optional Broker Credentials for Alpaca integration
+ALPACA_API_KEY = os.environ.get("ALPACA_API_KEY")
+ALPACA_SECRET_KEY = os.environ.get("ALPACA_SECRET_KEY")
+ALPACA_BASE_URL = os.environ.get("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
+
 
 # ---------------------------
 # Trade Execution Simulation
 # ---------------------------
-def simulate_paper_trade_execution(trade: Dict[str, Any]) -> Dict[str, Any]:
+def simulate_paper_trade_execution(trade: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
-    Simulate a paper trade execution.
-
-    In production, replace this function with a real trading API call.
+    Simulate a paper trade execution with enhanced fill logic.
+    Depending on the "scenario" key in the trade dict, the trade may be:
+      - Fully filled ("full")
+      - Partially filled with multiple events ("partial")
+      - Rejected ("reject")
+    If "scenario" is not provided, defaults to "full".
 
     Parameters:
-      trade (dict): Must include:
-          - "approved": bool,
-          - "symbol": str,
-          - "action": str,
-          - "price": float,
-          - "quantity": int.
-        Optional:
-          - "stop_loss_price": float,
-          - "scenario": str (one of "full", "partial", or "reject"; defaults to "full").
+        trade (dict): Must include:
+            - "approved": bool,
+            - "symbol": str,
+            - "action": str,
+            - "price": float,
+            - "quantity": int.
+          Optional:
+            - "stop_loss_price": float,
+            - "scenario": str (one of "full", "partial", "reject").
 
     Returns:
-      dict: Execution update with:
-          - "order_id": str,
-          - "status": str ("FILLED", "PARTIALLY_FILLED", or "REJECTED"),
-          - "filled_quantity": int,
-          - "avg_price": float,
-          - "timestamp": str (ISO format),
-          - "remaining_quantity": int (if applicable).
+        List[dict]: A list of execution event dictionaries. Each event includes:
+            - "order_id": str,
+            - "status": str ("FILLED", "PARTIALLY_FILLED", or "REJECTED"),
+            - "filled_quantity": int,
+            - "avg_price": float,
+            - "timestamp": str (ISO format),
+            - "remaining_quantity": int (if applicable).
     """
+    # Validate required fields
     required_fields = ['approved', 'symbol', 'action', 'price', 'quantity']
     for field in required_fields:
         if field not in trade:
@@ -82,79 +96,158 @@ def simulate_paper_trade_execution(trade: Dict[str, Any]) -> Dict[str, Any]:
             raise ValueError(f"Missing required field: {field}")
 
     if not trade.get("approved", False):
-        # Trade not approved; immediately return a rejected update.
-        return {
+        # Trade not approved; immediately return a rejected event.
+        return [{
             "order_id": "N/A",
             "status": "REJECTED",
             "filled_quantity": 0,
             "avg_price": 0.0,
-            "timestamp": datetime.utcnow().isoformat()
-        }
+            "timestamp": datetime.utcnow().isoformat(),
+            "remaining_quantity": trade.get("quantity", 0)
+        }]
 
     scenario = trade.get("scenario", "full").lower()
     order_id = f"MOCK-{uuid.uuid4()}"
-    timestamp = datetime.utcnow().isoformat()
+    base_timestamp = datetime.utcnow().isoformat()
     symbol = trade.get("symbol", "UNKNOWN")
     quantity = trade.get("quantity", 0)
     requested_price = trade.get("price", 0.0)
 
     if scenario == "full":
-        execution_update = {
+        event = {
             "order_id": order_id,
             "status": "FILLED",
             "filled_quantity": quantity,
             "avg_price": requested_price,
-            "timestamp": timestamp
+            "timestamp": base_timestamp,
+            "remaining_quantity": 0
         }
+        return [event]
+
     elif scenario == "partial":
+        # Simulate an initial partial fill and then a final fill event.
         if quantity > 1:
-            filled_qty = random.randint(1, quantity - 1)
+            # Randomly decide the quantity filled in the first event
+            first_fill = random.randint(1, quantity - 1)
         else:
-            filled_qty = quantity
-            scenario = "full"
-        execution_update = {
+            first_fill = quantity  # With quantity 1, it's a full fill.
+
+        first_event = {
             "order_id": order_id,
-            "status": "PARTIALLY_FILLED" if scenario == "partial" else "FILLED",
-            "filled_quantity": filled_qty,
-            "avg_price": requested_price + 0.05,  # simulate slight slippage
-            "timestamp": timestamp,
-            "remaining_quantity": quantity - filled_qty if scenario == "partial" else 0
+            "status": "PARTIALLY_FILLED",
+            "filled_quantity": first_fill,
+            "avg_price": requested_price + 0.05,  # simulate slight price slippage
+            "timestamp": base_timestamp,
+            "remaining_quantity": quantity - first_fill
         }
+        # Simulate a second event to fill the remainder
+        final_timestamp = datetime.utcnow().isoformat()
+        final_event = {
+            "order_id": order_id,
+            "status": "FILLED",
+            "filled_quantity": quantity,  # total filled quantity
+            "avg_price": requested_price,  # assume final price equal to requested price
+            "timestamp": final_timestamp,
+            "remaining_quantity": 0
+        }
+        return [first_event, final_event]
+
     elif scenario == "reject":
-        execution_update = {
+        event = {
             "order_id": order_id,
             "status": "REJECTED",
             "filled_quantity": 0,
             "avg_price": 0.0,
-            "timestamp": timestamp
+            "timestamp": base_timestamp,
+            "remaining_quantity": quantity
         }
+        return [event]
+
     else:
         logger.warning("Unknown scenario '%s'. Defaulting to full fill.", scenario)
-        execution_update = {
+        event = {
             "order_id": order_id,
             "status": "FILLED",
             "filled_quantity": quantity,
             "avg_price": requested_price,
-            "timestamp": timestamp
+            "timestamp": base_timestamp,
+            "remaining_quantity": 0
         }
+        return [event]
 
-    return execution_update
 
-
-def place_order(trade: Dict[str, Any]) -> Dict[str, Any]:
+# ---------------------------
+# Real Broker Integration (Alpaca Example)
+# ---------------------------
+def broker_place_order(trade: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
-    High-level function to place an order (mock implementation).
+    Placeholder function for integration with a real broker's paper trading API.
+    For this example, if ALPACA_API_KEY is provided, we attempt to call Alpaca's API.
+    Otherwise, we fallback to simulation.
 
     Parameters:
-      trade (dict): An approved trade dictionary.
+        trade (dict): Trade details dictionary.
 
     Returns:
-      dict: The execution update.
+        List[dict]: A list of execution event dictionaries.
+    """
+    if ALPACA_API_KEY:
+        try:
+            # Import the Alpaca Trade API library (ensure it's installed)
+            import alpaca_trade_api as tradeapi
+        except ImportError:
+            logger.error("alpaca_trade_api library not installed. Falling back to simulation.")
+            return simulate_paper_trade_execution(trade)
+
+        try:
+            api = tradeapi.REST(ALPACA_API_KEY, ALPACA_SECRET_KEY, base_url=ALPACA_BASE_URL)
+            # Submit a limit order; this is a simplified example.
+            order = api.submit_order(
+                symbol=trade['symbol'],
+                qty=trade['quantity'],
+                side=trade['action'].lower(),
+                type='limit',
+                limit_price=trade['price'],
+                time_in_force='gtc'
+            )
+            # In a real scenario, you would subscribe to order updates to handle partial fills.
+            execution_event = {
+                "order_id": order.id,
+                "status": order.status.upper(),  # e.g., "FILLED", "PARTIALLY_FILLED"
+                "filled_quantity": int(order.filled_qty),
+                "avg_price": float(order.filled_avg_price) if order.filled_avg_price else trade['price'],
+                "timestamp": datetime.utcnow().isoformat(),
+                "remaining_quantity": trade['quantity'] - int(order.filled_qty)
+            }
+            return [execution_event]
+        except Exception as e:
+            logger.error("Error calling Alpaca API: %s", str(e))
+            raise
+    else:
+        # Fallback to simulation if no real broker integration is configured.
+        return simulate_paper_trade_execution(trade)
+
+
+def place_order(trade: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    High-level function to place an order.
+    If broker API credentials are provided, use broker_place_order;
+    otherwise, use simulation.
+
+    Parameters:
+        trade (dict): An approved trade dictionary.
+
+    Returns:
+        List[dict]: A list of execution event dictionaries.
     """
     try:
-        execution_result = simulate_paper_trade_execution(trade)
-        logger.info("Execution Update for symbol=%s: %s", trade.get('symbol'), execution_result)
-        return execution_result
+        if ALPACA_API_KEY:
+            execution_updates = broker_place_order(trade)
+        else:
+            execution_updates = simulate_paper_trade_execution(trade)
+        for update in execution_updates:
+            logger.info("Execution Update for symbol=%s: %s", trade.get('symbol'), update)
+        return execution_updates
     except Exception as e:
         logger.error("Error during order placement: %s", str(e))
         raise
@@ -184,10 +277,12 @@ def get_db_connection():
 def init_db(conn):
     """
     Initialize the 'trades' table if it does not exist.
+    This schema allows multiple execution events per order.
     """
     create_table_query = """
     CREATE TABLE IF NOT EXISTS trades (
-        order_id TEXT PRIMARY KEY,
+        event_id SERIAL PRIMARY KEY,
+        order_id TEXT,
         symbol TEXT,
         status TEXT,
         filled_quantity INTEGER,
@@ -204,19 +299,17 @@ def init_db(conn):
 
 def insert_trade_update(conn, trade_update: Dict[str, Any]) -> None:
     """
-    Insert an execution update into the 'trades' table.
+    Insert an execution update event into the 'trades' table.
 
     Parameters:
-      conn: psycopg2 connection object.
-      trade_update (dict): Execution update dictionary.
+        conn: psycopg2 connection object.
+        trade_update (dict): Execution update dictionary.
     """
     insert_query = """
     INSERT INTO trades (order_id, symbol, status, filled_quantity, avg_price, execution_timestamp, remaining_quantity)
-    VALUES (%s, %s, %s, %s, %s, %s, %s)
-    ON CONFLICT (order_id) DO NOTHING;
+    VALUES (%s, %s, %s, %s, %s, %s, %s);
     """
-    # Attempt to extract symbol from the original trade if available,
-    # otherwise, fall back to the trade_update contents.
+    # Determine symbol: if nested trade details exist, use them.
     symbol = trade_update.get("trade", {}).get("symbol") or trade_update.get("symbol", "UNKNOWN")
     order_id = trade_update.get("order_id")
     status = trade_update.get("status")
@@ -237,35 +330,37 @@ def insert_trade_update(conn, trade_update: Dict[str, Any]) -> None:
 # ---------------------------
 def process_message(ch, method, properties, body, db_conn):
     """
-    Callback function to process messages from RabbitMQ.
+    Callback to process messages from RabbitMQ.
+    Consumes an approved trade, places the order (via simulation or broker API),
+    and logs each execution event in Postgres.
 
     Parameters:
-      ch: RabbitMQ channel.
-      method: Delivery method.
-      properties: Message properties.
-      body: The message body.
-      db_conn: Postgres connection object.
+        ch: RabbitMQ channel.
+        method: Delivery method.
+        properties: Message properties.
+        body: The message body.
+        db_conn: Postgres connection.
     """
     try:
         message = json.loads(body.decode())
         logger.info("Received approved trade: %s", message)
 
-        # Process the trade: simulate order execution.
-        execution_update = place_order(message)
+        # Place the order and obtain one or more execution events.
+        execution_updates = place_order(message)
 
-        # Log execution update in Postgres.
-        insert_trade_update(db_conn, execution_update)
+        # Log each execution event in the DB.
+        for update in execution_updates:
+            insert_trade_update(db_conn, update)
 
         # Acknowledge the message.
         ch.basic_ack(delivery_tag=method.delivery_tag)
     except Exception as e:
         logger.error("Error processing message: %s", str(e))
-        # Optionally: reject and do not requeue the message.
         ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
 
 
 def main():
-    # Connect to Postgres and ensure the trades table exists.
+    # Connect to Postgres and initialize the DB.
     db_conn = get_db_connection()
     init_db(db_conn)
 
@@ -275,7 +370,7 @@ def main():
     connection = pika.BlockingConnection(parameters)
     channel = connection.channel()
 
-    # Declare the queue to ensure it exists.
+    # Declare the approved_trades queue.
     queue_name = "approved_trades"
     channel.queue_declare(queue=queue_name, durable=True)
 
@@ -284,7 +379,7 @@ def main():
     # Start consuming messages.
     channel.basic_consume(
         queue=queue_name,
-        on_message_callback=lambda ch, method, properties, body: process_message(ch, method, properties, body, db_conn)
+        on_message_callback=lambda ch, method, props, body: process_message(ch, method, props, body, db_conn)
     )
 
     try:

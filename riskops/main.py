@@ -2,12 +2,15 @@
 """
 riskops/main.py
 
-Production-Ready RiskOps Module:
-- Consumes trade signals from RabbitMQ "trade_signals" queue.
-- Applies a configurable risk check (default 2% of portfolio capital).
-- Updates a Postgres portfolio (tracking total_capital and positions).
-- Publishes approved trades to RabbitMQ "approved_trades" queue.
-- Environment variables:
+Enhanced RiskOps Module:
+- Consumes trade signals from the RabbitMQ "trade_signals" queue.
+- Applies a 2% risk rule with a 5% stop-loss buffer for BUY orders.
+- Tracks portfolio total capital, open positions, and daily PnL in Postgres.
+- Enforces additional constraints:
+    * Maximum open positions limit.
+    * Maximum daily loss limit (trading paused if breached).
+- Publishes approved trades to "approved_trades" (or a "trading_paused" message).
+- Uses the following environment variables:
     RABBITMQ_HOST, RABBITMQ_USER, RABBITMQ_PASS
     DB_HOST, DB_USER, DB_PASS, DB_NAME
 """
@@ -16,11 +19,12 @@ import os
 import json
 import math
 import logging
+from datetime import date
 import pika
 import psycopg2
 import psycopg2.extras
-from dataclasses import dataclass, field
-from typing import Dict, Optional
+from dataclasses import dataclass
+from typing import Optional
 
 # -------------------------------------------------------------------
 # Logging Configuration
@@ -44,13 +48,17 @@ DB_NAME = os.environ.get("DB_NAME", "riskops_db")
 
 TRADE_SIGNALS_QUEUE = "trade_signals"
 APPROVED_TRADES_QUEUE = "approved_trades"
+TRADING_PAUSED_QUEUE = "trading_paused"
 
-MAX_RISK_PER_TRADE = 0.02  # 2% risk per trade
-STOP_LOSS_BUFFER = 0.05    # 5% stop-loss buffer for BUY orders
+MAX_RISK_PER_TRADE = 0.02   # Risk up to 2% of available capital per trade.
+STOP_LOSS_BUFFER = 0.05     # 5% stop-loss buffer for BUY orders.
 INITIAL_CAPITAL = 100000.00
 
+MAX_OPEN_POSITIONS = 10     # Maximum allowed open positions.
+MAX_DAILY_LOSS = -5000.0    # If daily PnL falls below this (i.e. loss exceeds $5000), pause trading.
+
 # -------------------------------------------------------------------
-# Data Classes for Trade Signals and Results
+# Data Classes
 # -------------------------------------------------------------------
 @dataclass
 class TradeSignal:
@@ -69,103 +77,139 @@ class TradeResult:
     reason: Optional[str] = None
 
 # -------------------------------------------------------------------
-# PortfolioDB: Manages the Postgres Portfolio Table
+# DBManager: Manages Postgres Tables for Portfolio, Positions, and Daily PnL
 # -------------------------------------------------------------------
-class PortfolioDB:
+class DBManager:
     def __init__(self, conn):
         self.conn = conn
-        self.ensure_table()
+        self.ensure_tables()
 
-    def ensure_table(self):
-        """Creates the portfolio table if it doesn't exist and initializes a record."""
+    def ensure_tables(self):
+        """Creates the required tables if they don't exist."""
         with self.conn.cursor() as cur:
+            # Portfolio table (single row storing total capital)
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS portfolio (
                     id SERIAL PRIMARY KEY,
-                    total_capital NUMERIC NOT NULL,
-                    positions JSONB DEFAULT '{}'::jsonb
+                    total_capital NUMERIC NOT NULL
+                );
+            """)
+            # Positions table for open positions.
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS positions (
+                    symbol VARCHAR(10) PRIMARY KEY,
+                    shares INTEGER NOT NULL,
+                    avg_price NUMERIC NOT NULL
+                );
+            """)
+            # Daily PnL table to track realized PnL per day.
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS daily_pnl (
+                    day DATE PRIMARY KEY,
+                    pnl NUMERIC NOT NULL
                 );
             """)
             self.conn.commit()
-            # Ensure a single portfolio record exists (assumed with id=1)
+
+            # Initialize portfolio if not exists.
             cur.execute("SELECT COUNT(*) FROM portfolio;")
-            count = cur.fetchone()[0]
-            if count == 0:
-                cur.execute(
-                    "INSERT INTO portfolio (total_capital, positions) VALUES (%s, %s);",
-                    (INITIAL_CAPITAL, json.dumps({}))
-                )
+            if cur.fetchone()[0] == 0:
+                cur.execute("INSERT INTO portfolio (total_capital) VALUES (%s);", (INITIAL_CAPITAL,))
                 self.conn.commit()
                 logger.info("Initialized portfolio with capital: %s", INITIAL_CAPITAL)
 
-    def get_portfolio(self) -> Dict:
-        """Fetches the portfolio record (assumes a single row with id=1)."""
-        with self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute("SELECT * FROM portfolio WHERE id = 1;")
-            portfolio = cur.fetchone()
-            return portfolio
+            # Initialize today's daily pnl if not exists.
+            today = date.today()
+            cur.execute("SELECT COUNT(*) FROM daily_pnl WHERE day = %s;", (today,))
+            if cur.fetchone()[0] == 0:
+                cur.execute("INSERT INTO daily_pnl (day, pnl) VALUES (%s, %s);", (today, 0.0))
+                self.conn.commit()
+                logger.info("Initialized daily pnl for %s.", today)
 
-    def update_portfolio_buy(self, symbol: str, quantity: int, price: float):
-        """Updates the portfolio for a BUY trade."""
-        with self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            portfolio = self.get_portfolio()
-            total_capital = float(portfolio["total_capital"])
-            positions = portfolio["positions"] or {}
-            cost = quantity * price
-            if cost > total_capital:
-                raise ValueError("Insufficient capital in portfolio.")
-            total_capital -= cost
+    def get_portfolio_capital(self) -> float:
+        """Fetches the total capital from the portfolio table."""
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT total_capital FROM portfolio WHERE id = 1;")
+            result = cur.fetchone()
+            return float(result[0]) if result else 0.0
 
-            # Update positions: calculate new weighted average price if position exists.
-            if symbol in positions:
-                pos = positions[symbol]
-                old_shares = pos.get("shares", 0)
-                old_avg = pos.get("avg_price", 0.0)
+    def update_portfolio_capital(self, new_capital: float):
+        """Updates the portfolio's total capital."""
+        with self.conn.cursor() as cur:
+            cur.execute("UPDATE portfolio SET total_capital = %s WHERE id = 1;", (new_capital,))
+            self.conn.commit()
+
+    def get_position(self, symbol: str):
+        """Retrieves the open position for a symbol."""
+        with self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT * FROM positions WHERE symbol = %s;", (symbol,))
+            return cur.fetchone()
+
+    def get_open_positions_count(self) -> int:
+        """Returns the count of open positions."""
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM positions;")
+            return cur.fetchone()[0]
+
+    def update_position_buy(self, symbol: str, quantity: int, price: float):
+        """Updates the positions table for a BUY trade."""
+        pos = self.get_position(symbol)
+        with self.conn.cursor() as cur:
+            if pos:
+                old_shares = pos["shares"]
+                old_avg = float(pos["avg_price"])
                 new_shares = old_shares + quantity
                 new_avg = ((old_shares * old_avg) + (quantity * price)) / new_shares
-                positions[symbol] = {"shares": new_shares, "avg_price": new_avg}
+                cur.execute("UPDATE positions SET shares = %s, avg_price = %s WHERE symbol = %s;",
+                            (new_shares, new_avg, symbol))
             else:
-                positions[symbol] = {"shares": quantity, "avg_price": price}
-
-            cur.execute(
-                "UPDATE portfolio SET total_capital = %s, positions = %s WHERE id = 1;",
-                (total_capital, json.dumps(positions))
-            )
+                cur.execute("INSERT INTO positions (symbol, shares, avg_price) VALUES (%s, %s, %s);",
+                            (symbol, quantity, price))
             self.conn.commit()
-            logger.info("Portfolio BUY updated: %s shares of %s at $%s", quantity, symbol, price)
 
-    def update_portfolio_sell(self, symbol: str, quantity: int, price: float):
-        """Updates the portfolio for a SELL trade."""
-        with self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            portfolio = self.get_portfolio()
-            total_capital = float(portfolio["total_capital"])
-            positions = portfolio["positions"] or {}
-            if symbol not in positions or positions[symbol].get("shares", 0) < quantity:
-                raise ValueError("Insufficient shares to sell.")
-            proceeds = quantity * price
-            total_capital += proceeds
-            pos = positions[symbol]
-            pos["shares"] -= quantity
-            if pos["shares"] <= 0:
-                del positions[symbol]
+    def update_position_sell(self, symbol: str, quantity: int, price: float) -> float:
+        """
+        Updates the positions table for a SELL trade.
+        Returns the realized PnL for the trade.
+        """
+        pos = self.get_position(symbol)
+        if not pos or pos["shares"] < quantity:
+            raise ValueError(f"Insufficient shares to sell for symbol {symbol}.")
+        old_shares = pos["shares"]
+        avg_price = float(pos["avg_price"])
+        realized_pnl = (price - avg_price) * quantity
+        new_shares = old_shares - quantity
+        with self.conn.cursor() as cur:
+            if new_shares <= 0:
+                cur.execute("DELETE FROM positions WHERE symbol = %s;", (symbol,))
             else:
-                positions[symbol] = pos
-
-            cur.execute(
-                "UPDATE portfolio SET total_capital = %s, positions = %s WHERE id = 1;",
-                (total_capital, json.dumps(positions))
-            )
+                cur.execute("UPDATE positions SET shares = %s WHERE symbol = %s;", (new_shares, symbol))
             self.conn.commit()
-            logger.info("Portfolio SELL updated: %s shares of %s at $%s", quantity, symbol, price)
+        return realized_pnl
+
+    def update_daily_pnl(self, trade_pnl: float):
+        """Updates today's daily pnl by adding the realized trade pnl."""
+        today = date.today()
+        with self.conn.cursor() as cur:
+            cur.execute("UPDATE daily_pnl SET pnl = pnl + %s WHERE day = %s;", (trade_pnl, today))
+            self.conn.commit()
+
+    def get_daily_pnl(self) -> float:
+        """Fetches today's daily pnl."""
+        today = date.today()
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT pnl FROM daily_pnl WHERE day = %s;", (today,))
+            result = cur.fetchone()
+            return float(result[0]) if result else 0.0
 
 # -------------------------------------------------------------------
 # RiskManager: Applies Risk Constraints and Updates the Portfolio
 # -------------------------------------------------------------------
 class RiskManager:
-    def __init__(self, portfolio_db: PortfolioDB,
+    def __init__(self, db_manager: DBManager,
                  max_risk_per_trade: float = MAX_RISK_PER_TRADE,
                  stop_loss_buffer: float = STOP_LOSS_BUFFER):
-        self.portfolio_db = portfolio_db
+        self.db_manager = db_manager
         self.max_risk_per_trade = max_risk_per_trade
         self.stop_loss_buffer = stop_loss_buffer
 
@@ -174,18 +218,33 @@ class RiskManager:
         action = signal.action.upper()
         price = signal.price
 
-        # Validate the signal.
+        # Validate the trade signal.
         if not symbol or action not in {"BUY", "SELL"} or price <= 0:
             reason = "Invalid trade signal data."
             logger.error(f"{reason} Signal: {signal}")
             return TradeResult(approved=False, symbol=symbol, action=action, reason=reason)
 
-        portfolio = self.portfolio_db.get_portfolio()
-        total_capital = float(portfolio["total_capital"])
+        # Check if the daily loss limit is hit.
+        current_daily_pnl = self.db_manager.get_daily_pnl()
+        if current_daily_pnl <= MAX_DAILY_LOSS:
+            reason = f"Daily loss limit reached: {current_daily_pnl}. Trading paused."
+            logger.warning(reason)
+            return TradeResult(approved=False, symbol=symbol, action=action, reason=reason)
+
+        # Retrieve current portfolio capital.
+        total_capital = self.db_manager.get_portfolio_capital()
         max_notional = total_capital * self.max_risk_per_trade
 
-        # For BUY orders, set a stop-loss and compute risk per share.
+        # Additional rule: For BUY orders that would open a new position,
+        # enforce a maximum open positions limit.
         if action == "BUY":
+            pos = self.db_manager.get_position(symbol)
+            if not pos:
+                open_positions = self.db_manager.get_open_positions_count()
+                if open_positions >= MAX_OPEN_POSITIONS:
+                    reason = f"Open positions limit reached: {open_positions}."
+                    logger.warning(reason)
+                    return TradeResult(approved=False, symbol=symbol, action=action, reason=reason)
             stop_loss_price = round(price * (1 - self.stop_loss_buffer), 2)
             risk_per_share = price - stop_loss_price
             if risk_per_share <= 0:
@@ -195,32 +254,32 @@ class RiskManager:
             max_shares_by_risk = math.floor(max_notional / risk_per_share)
         elif action == "SELL":
             stop_loss_price = None
-            risk_per_share = 0  # Not used for SELL orders.
+            risk_per_share = 0
         else:
             reason = f"Unknown action: {action}"
             logger.error(reason)
             return TradeResult(approved=False, symbol=symbol, action=action, reason=reason)
 
-        # Determine final quantity: for BUY, use the lower of the risk-adjusted or desired quantity.
+        # Determine final trade quantity.
         if signal.desired_quantity is not None:
-            quantity = (min(signal.desired_quantity, max_shares_by_risk)
-                        if action == "BUY" else signal.desired_quantity)
+            quantity = min(signal.desired_quantity, max_shares_by_risk) if action == "BUY" else signal.desired_quantity
         else:
             quantity = max_shares_by_risk if action == "BUY" else 0
 
-        if action == "BUY" and (quantity is None or quantity < 1):
+        if action == "BUY" and (quantity < 1):
             reason = "Risk constraints prevent executing even 1 share."
             logger.info(reason)
             return TradeResult(approved=False, symbol=symbol, action=action, reason=reason)
 
         if action == "SELL":
-            positions = portfolio.get("positions") or {}
-            held = positions.get(symbol, {}).get("shares", 0)
-            if held < quantity:
-                reason = f"Insufficient shares to sell. Held: {held}, Requested: {quantity}"
+            pos = self.db_manager.get_position(symbol)
+            if not pos or pos["shares"] < quantity:
+                held = pos["shares"] if pos else 0
+                reason = f"Insufficient shares to sell: Held {held}, Requested {quantity}."
                 logger.error(reason)
                 return TradeResult(approved=False, symbol=symbol, action=action, reason=reason)
 
+        # Execute trade.
         try:
             if action == "BUY":
                 total_cost = quantity * price
@@ -228,12 +287,18 @@ class RiskManager:
                     reason = "Not enough capital for BUY trade."
                     logger.error(reason)
                     return TradeResult(approved=False, symbol=symbol, action=action, reason=reason)
-                self.portfolio_db.update_portfolio_buy(symbol, quantity, price)
+                new_capital = total_capital - total_cost
+                self.db_manager.update_portfolio_capital(new_capital)
+                self.db_manager.update_position_buy(symbol, quantity, price)
                 logger.info("BUY executed: %s shares of %s at $%s. Stop-loss: $%s", quantity, symbol, price, stop_loss_price)
                 return TradeResult(approved=True, symbol=symbol, action=action, executed_quantity=quantity, stop_loss=stop_loss_price)
             elif action == "SELL":
-                self.portfolio_db.update_portfolio_sell(symbol, quantity, price)
-                logger.info("SELL executed: %s shares of %s at $%s.", quantity, symbol, price)
+                # Execute sell trade and compute realized PnL.
+                realized_pnl = self.db_manager.update_position_sell(symbol, quantity, price)
+                new_capital = total_capital + (quantity * price)
+                self.db_manager.update_portfolio_capital(new_capital)
+                self.db_manager.update_daily_pnl(realized_pnl)
+                logger.info("SELL executed: %s shares of %s at $%s. Realized PnL: $%s", quantity, symbol, price, realized_pnl)
                 return TradeResult(approved=True, symbol=symbol, action=action, executed_quantity=quantity)
         except Exception as e:
             reason = f"Trade execution error: {e}"
@@ -255,6 +320,7 @@ def setup_rabbitmq():
     channel = connection.channel()
     channel.queue_declare(queue=TRADE_SIGNALS_QUEUE, durable=True)
     channel.queue_declare(queue=APPROVED_TRADES_QUEUE, durable=True)
+    channel.queue_declare(queue=TRADING_PAUSED_QUEUE, durable=True)
     return connection, channel
 
 def publish_approved_trade(channel, trade_result: TradeResult):
@@ -269,9 +335,20 @@ def publish_approved_trade(channel, trade_result: TradeResult):
         exchange='',
         routing_key=APPROVED_TRADES_QUEUE,
         body=message,
-        properties=pika.BasicProperties(delivery_mode=2)  # persistent message
+        properties=pika.BasicProperties(delivery_mode=2)
     )
     logger.info("Published approved trade: %s", message)
+
+def publish_trading_paused(channel, reason: str):
+    """Publishes a trading_paused message to notify downstream systems."""
+    message = json.dumps({"status": "paused", "reason": reason})
+    channel.basic_publish(
+        exchange='',
+        routing_key=TRADING_PAUSED_QUEUE,
+        body=message,
+        properties=pika.BasicProperties(delivery_mode=2)
+    )
+    logger.info("Published trading paused message: %s", message)
 
 def on_message(channel, method_frame, header_frame, body, risk_manager: RiskManager):
     """Callback invoked when a trade signal message is received."""
@@ -288,7 +365,11 @@ def on_message(channel, method_frame, header_frame, body, risk_manager: RiskMana
         if result.approved:
             publish_approved_trade(channel, result)
         else:
-            logger.info("Trade signal rejected: %s", result.reason)
+            # If trading is paused due to daily loss limit, publish a trading_paused message.
+            if result.reason and "Daily loss limit reached" in result.reason:
+                publish_trading_paused(channel, result.reason)
+            else:
+                logger.info("Trade signal rejected: %s", result.reason)
     except Exception as e:
         logger.exception("Failed to process message: %s", e)
     finally:
@@ -300,7 +381,7 @@ def start_consuming(risk_manager: RiskManager):
     channel.basic_qos(prefetch_count=1)
     channel.basic_consume(
         queue=TRADE_SIGNALS_QUEUE,
-        on_message_callback=lambda ch, method, properties, body: on_message(ch, method, properties, body, risk_manager)
+        on_message_callback=lambda ch, method, props, body: on_message(ch, method, props, body, risk_manager)
     )
     logger.info("Started consuming from queue: %s", TRADE_SIGNALS_QUEUE)
     try:
@@ -326,11 +407,8 @@ def main():
         logger.exception("Failed to connect to Postgres: %s", e)
         return
 
-    # Initialize PortfolioDB and RiskManager.
-    portfolio_db = PortfolioDB(conn)
-    risk_manager = RiskManager(portfolio_db)
-
-    # Start consuming trade signals from RabbitMQ.
+    db_manager = DBManager(conn)
+    risk_manager = RiskManager(db_manager)
     start_consuming(risk_manager)
 
 if __name__ == "__main__":
