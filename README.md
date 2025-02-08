@@ -1,32 +1,34 @@
-Below is a sample README.md that you can adapt for your StockAutoTrader project. It covers the overall structure, how to run the system via Docker Compose, how each service works (DataFlow, Quant, RiskOps, ExecConnect), and some notes on configuration/environment variables. Feel free to customize or expand on any section—particularly if you want to add more detailed usage instructions, environment variable references, or advanced deployment notes.
+Below is an updated version of your README that reflects our current project status, including details on the AI agent workflow, design document, and task management. You can replace your existing README.md with this version:
 
-StockAutoTrader
+# StockAutoTrader
 
-StockAutoTrader is a multi-agent, microservices-based trading system that uses RabbitMQ for message passing, PostgreSQL for data storage, and four specialized services:
-	1.	DataFlow – Ingests real or mock market data and publishes it to market_data queue.
-	2.	Quant – Consumes market data, applies trading strategy logic (e.g., moving averages), and publishes signals to trade_signals.
-	3.	RiskOps – Consumes signals, applies risk constraints (portfolio checks, daily PnL limits, etc.), and publishes approved trades to approved_trades.
-	4.	ExecConnect – Consumes approved trades, executes them (mock or real broker API), and logs fills to the database.
+StockAutoTrader is a multi-agent, microservices-based automated trading system. It leverages RabbitMQ for message passing, PostgreSQL for data storage, and four specialized services to manage the trading pipeline: DataFlow, Quant, RiskOps, and ExecConnect. This project is developed using an AI-assisted workflow with dedicated agents for project management and coding.
 
-Table of Contents
-	•	Project Structure
-	•	Prerequisites
-	•	Getting Started
-	•	Clone & Setup
-	•	Environment Variables
-	•	Build & Run
-	•	Services Overview
-	•	DataFlow
-	•	Quant
-	•	RiskOps
-	•	ExecConnect
-	•	Database
-	•	Message Passing (RabbitMQ)
-	•	Future Improvements
-	•	License (Optional)
+## Table of Contents
+- [Project Overview](#project-overview)
+- [Project Structure](#project-structure)
+- [Prerequisites](#prerequisites)
+- [Getting Started](#getting-started)
+  - [Clone & Setup](#clone--setup)
+  - [Environment Variables](#environment-variables)
+- [Build & Run](#build--run)
+- [Services Overview](#services-overview)
+  - [DataFlow](#dataflow)
+  - [Quant](#quant)
+  - [RiskOps](#riskops)
+  - [ExecConnect](#execconnect)
+- [Design & Specification Document](#design--specification-document)
+- [Project Management & AI Agent Workflow](#project-management--ai-agent-workflow)
+- [Database & Messaging](#database--messaging)
+- [Future Improvements](#future-improvements)
+- [License](#license)
 
-Project Structure
+## Project Overview
+StockAutoTrader is designed to automate stock trading by processing market data, generating trade signals, applying risk management, and executing orders. The system is built with modular microservices and a collaborative AI development workflow.
 
+## Project Structure
+
+```bash
 StockAutoTrader/
 ├── dataflow/
 │   ├── Dockerfile
@@ -46,19 +48,15 @@ StockAutoTrader/
 │   └── requirements.txt
 ├── docker-compose.yml
 ├── .env.example
-└── README.md
+├── README.md
+└── Design_Specification_Document.md
 
-	•	dataflow/: Code & Dockerfile for the DataFlow microservice.
-	•	quant/: Code & Dockerfile for the Quant (strategy) microservice.
-	•	riskops/: Code & Dockerfile for RiskOps (risk management).
-	•	execconnect/: Code & Dockerfile for broker/order execution logic.
-	•	docker-compose.yml: Defines how each service + RabbitMQ + Postgres run together.
-	•	.env.example: Template for environment variables (like credentials).
+	•	Design_Specification_Document.md: Contains the detailed design and specifications for data schemas, message formats, function signatures, and agent responsibilities.
 
 Prerequisites
-	1.	Docker & Docker Compose (or Docker Engine with built-in compose).
-	2.	(Optional) Python 3.9+ locally if you want to run scripts or tests outside Docker.
-	3.	Git to clone this repo.
+	•	Docker & Docker Compose (or Docker Engine with built-in Compose)
+	•	(Optional) Python 3.9+ for local testing or script execution
+	•	Git for cloning and version control
 
 Getting Started
 
@@ -68,84 +66,100 @@ git clone https://github.com/Solders-Girdles/StockAutoTrader.git
 cd StockAutoTrader
 
 Environment Variables
-	•	Check .env.example for placeholders like BROKER_API_KEY, DB_HOST, etc.
-	•	You can rename .env.example to .env, fill in real values (if needed), and in docker-compose.yml you can load it using env_file: .env (if not already present).
-	•	For the basic run, the defaults in the Compose file might suffice (RabbitMQ user/pass, Postgres user/pass).
+	•	Rename .env.example to .env and update the placeholder values as required.
+	•	Note: Default credentials (for RabbitMQ and PostgreSQL) are for development only. Change them before production use.
 
 Build & Run
 
+Build and run the system using Docker Compose:
+
 docker compose up --build
 
-This will:
-	1.	Pull/run RabbitMQ with management UI on http://localhost:15672.
-	2.	Pull/run Postgres for the DB on port 5432.
-	3.	Build each microservice container (dataflow, quant, riskops, execconnect), install dependencies, and start them.
+This command will:
+	1.	Start RabbitMQ (management UI available at http://localhost:15672).
+	2.	Launch PostgreSQL on port 5432.
+	3.	Build and run each microservice container (dataflow, quant, riskops, execconnect).
 
-You’ll see logs from each service in the terminal. Press Ctrl+C to stop.
+Press Ctrl+C to stop the services.
 
 Services Overview
 
 DataFlow
-	•	Path: dataflow/
-	•	Purpose: Fetch (mock or real) market data and publish to market_data queue.
-	•	Key Files:
-	•	main.py: Contains logic to connect to RabbitMQ, generate/fetch data, and publish.
-	•	requirements.txt: Typically includes pika, requests, psycopg2-binary if needed for DB logs.
+	•	Location: dataflow/
+	•	Purpose: Ingests (mock or real) market data and publishes it to the market_data queue.
+	•	Key Functions:
+	•	fetch_market_data() -> dict
+	•	publish_market_data(data: dict) -> None
 
 Quant
-	•	Path: quant/
-	•	Purpose: Subscribes to market_data queue, applies strategy logic (e.g., moving averages), publishes signals to trade_signals queue.
-	•	Key Files:
-	•	main.py: Listens for data points, does calculations, and publishes signals.
-	•	requirements.txt: Might include pika, numpy, pandas, psycopg2-binary (optional) for logging signals in DB.
+	•	Location: quant/
+	•	Purpose: Subscribes to the market_data queue, applies trading strategy logic (e.g., moving averages), and publishes trade signals to the trade_signals queue.
+	•	Key Functions:
+	•	process_market_data(data: dict) -> dict
+	•	compute_signal(data: dict) -> dict
+	•	publish_trade_signal(signal: dict) -> None
 
 RiskOps
-	•	Path: riskops/
-	•	Purpose: Consumes trade_signals, applies risk constraints, updates portfolio in Postgres, publishes approved trades to approved_trades.
-	•	Key Files:
-	•	main.py: Contains the risk logic (2% rule, daily PnL, etc.), DB usage for portfolio, and message passing to next queue.
-	•	requirements.txt: Typically includes pika + psycopg2-binary.
+	•	Location: riskops/
+	•	Purpose: Consumes trade signals from trade_signals, applies risk management (e.g., 2% rule, daily PnL limits), updates portfolio metrics, and publishes approved trades to the approved_trades queue.
+	•	Key Functions:
+	•	evaluate_risk(signal: dict) -> bool
+	•	update_portfolio(signal: dict) -> None
+	•	publish_approved_trade(signal: dict) -> None
 
 ExecConnect
-	•	Path: execconnect/
-	•	Purpose: Receives approved_trades, mocks or calls a real broker API to place orders, logs them in Postgres.
-	•	Key Files:
-	•	main.py: Subscribes to approved_trades, finalizes orders, stores them in trades table.
-	•	requirements.txt: pika, psycopg2-binary, plus any broker libraries if hooking up to a real paper API.
+	•	Location: execconnect/
+	•	Purpose: Receives approved trades from approved_trades, executes orders (via a broker API or a mock interface), and logs trade executions to the PostgreSQL database.
+	•	Key Functions:
+	•	execute_trade(trade: dict) -> dict
+	•	log_trade_execution(execution_result: dict) -> None
+
+Design & Specification Document
+	•	Refer to Design_Specification_Document.md for detailed data schemas, message formats, function signatures, and a breakdown of responsibilities for each AI agent.
+	•	This document is the single source of truth for system architecture and must be kept up-to-date as the project evolves.
+
+Project Management & AI Agent Workflow
+	•	AI Agent Roles:
+	•	O1-Pro (Project Manager): Oversees overall project integration, task assignments, and code reviews.
+	•	O3-mini-high Agents: Each is responsible for implementing specific microservices (DataFlow, Quant, RiskOps, ExecConnect).
+	•	Task Management:
+	•	Use GitHub Issues or your preferred task board to track discrete tasks derived from the design document.
+	•	Milestones and periodic status updates are required from each agent.
+	•	Communication:
+	•	Daily standup updates and code reviews will ensure all agents are aligned.
+	•	Changes must be documented and integrated into both the design document and this README.
+
+Database & Messaging
 
 Database
-	•	Service: db in docker-compose.yml is a Postgres container.
-	•	Credentials: (default) user=myuser, pass=mypass, db=traderdb.
-	•	Persistent Volume: postgres_data to avoid losing data on container restarts.
-	•	Usage: Each microservice can read/write tables (portfolio, trades, etc.) via environment variables (e.g., DB_HOST=db, DB_USER=myuser).
-
-To inspect or debug:
+	•	Service: PostgreSQL (via Docker Compose)
+	•	Default Credentials: user=myuser, password=mypass, database=traderdb
+	•	Access:
 
 docker compose exec db psql -U myuser -d traderdb
 
-Then normal SQL commands, e.g. SELECT * FROM trades;.
+
 
 Message Passing (RabbitMQ)
-	•	Service: rabbitmq in docker-compose.yml, ports 5672 (AMQP) & 15672 (management UI).
-	•	Credentials: user=myuser, pass=mypass.
+	•	Service: RabbitMQ (via Docker Compose)
+	•	Management UI: http://localhost:15672 (login with credentials from .env)
 	•	Queues:
-	•	market_data – used by DataFlow → consumed by Quant.
-	•	trade_signals – published by Quant → consumed by RiskOps.
-	•	approved_trades – published by RiskOps → consumed by ExecConnect.
-	•	Access UI: http://localhost:15672 (login with myuser/mypass).
+	•	market_data – DataFlow publishes market data.
+	•	trade_signals – Quant publishes trade signals.
+	•	approved_trades – RiskOps publishes approved trades.
 
 Future Improvements
-	1.	Real Data: Switch DataFlow from mock to real-time sources (Polygon, Alpha Vantage, Alpaca).
-	2.	Advanced Strategies: Add more indicators, ML-based signals, multi-symbol logic in Quant.
-	3.	Sophisticated Risk: Factor-based constraints, sector exposures, correlation checks in RiskOps.
-	4.	Live Broker API: Integrate ExecConnect with a paper trading account (Alpaca or IBKR).
-	5.	Logging & Monitoring: Use structured logs, set up a monitoring stack (Prometheus/Grafana or ELK).
-	6.	Dashboard: Build a “VizMaster” service that shows real-time PnL, positions, and trades.
+	•	Data Integration: Move from mock data to real-time market data feeds (e.g., Polygon, Alpha Vantage, Alpaca).
+	•	Advanced Strategies: Add additional trading strategies including multi-indicator and ML-based signals.
+	•	Enhanced Risk Management: Incorporate more sophisticated risk assessments (e.g., sector exposure, correlation checks).
+	•	Broker API Integration: Connect ExecConnect to a live or paper trading API.
+	•	Logging & Monitoring: Implement structured logging and monitoring dashboards (using Prometheus, Grafana, or ELK).
+	•	Dashboard Development: Build a real-time visualization dashboard for trade performance.
 
 License
 
-(If you have a license, mention it here, e.g., MIT License or Apache 2.0. Otherwise, you can omit this section.)
+Specify your license here (e.g., MIT License, Apache 2.0).
 
-Conclusion
+---
 
-With this README, new developers or collaborators can see how your system is structured, how to run it, and what each microservice does. As you refine the code, update the docs with advanced usage, environment variable references, or deployment best practices. Happy trading!
+This updated README now clearly outlines the overall architecture, agent roles, design document reference, and task management practices. It’s designed to keep all team members (human or AI) aligned as we move forward with our improvements. Let me know if further adjustments are needed or if we should proceed with the next implementation steps.
