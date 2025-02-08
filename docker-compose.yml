@@ -1,24 +1,127 @@
 version: "3.8"
 
 services:
+  # -------------------------------------------------
+  # Message Bus: RabbitMQ
+  # -------------------------------------------------
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: rabbitmq_svc
+    environment:
+      RABBITMQ_DEFAULT_USER: myuser
+      RABBITMQ_DEFAULT_PASS: mypass
+    ports:
+      - "5672:5672"   # AMQP protocol port
+      - "15672:15672" # RabbitMQ management UI
+    networks:
+      - tradingnet
+
+  # -------------------------------------------------
+  # Database: PostgreSQL
+  # -------------------------------------------------
+  db:
+    image: postgres:15
+    container_name: postgres_db
+    environment:
+      POSTGRES_USER: myuser
+      POSTGRES_PASSWORD: mypass
+      POSTGRES_DB: traderdb
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - tradingnet
+
+  # -------------------------------------------------
+  # DataFlow Service
+  # -------------------------------------------------
   dataflow:
     build: ./dataflow
     container_name: dataflow_service
+    depends_on:
+      - rabbitmq
+      - db
+    environment:
+      # RabbitMQ connection info
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_USER: myuser
+      RABBITMQ_PASS: mypass
+      # Postgres connection info (if needed in DataFlow)
+      DB_HOST: db
+      DB_USER: myuser
+      DB_PASS: mypass
+      DB_NAME: traderdb
+    networks:
+      - tradingnet
 
+  # -------------------------------------------------
+  # Quant Service
+  # -------------------------------------------------
   quant:
     build: ./quant
     container_name: quant_service
     depends_on:
       - dataflow
+      - rabbitmq
+      - db
+    environment:
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_USER: myuser
+      RABBITMQ_PASS: mypass
+      DB_HOST: db
+      DB_USER: myuser
+      DB_PASS: mypass
+      DB_NAME: traderdb
+    networks:
+      - tradingnet
 
+  # -------------------------------------------------
+  # RiskOps Service
+  # -------------------------------------------------
   riskops:
     build: ./riskops
     container_name: riskops_service
     depends_on:
       - quant
+      - rabbitmq
+      - db
+    environment:
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_USER: myuser
+      RABBITMQ_PASS: mypass
+      DB_HOST: db
+      DB_USER: myuser
+      DB_PASS: mypass
+      DB_NAME: traderdb
+    networks:
+      - tradingnet
 
+  # -------------------------------------------------
+  # ExecConnect Service
+  # -------------------------------------------------
   execconnect:
     build: ./execconnect
     container_name: execconnect_service
     depends_on:
       - riskops
+      - rabbitmq
+      - db
+    environment:
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_USER: myuser
+      RABBITMQ_PASS: mypass
+      DB_HOST: db
+      DB_USER: myuser
+      DB_PASS: mypass
+      DB_NAME: traderdb
+    networks:
+      - tradingnet
+
+# -------------------------------------------------
+# Networks & Volumes
+# -------------------------------------------------
+networks:
+  tradingnet:
+    driver: bridge
+
+volumes:
+  postgres_data:

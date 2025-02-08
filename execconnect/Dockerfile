@@ -1,10 +1,19 @@
+# execconnect/Dockerfile
 FROM python:3.9-slim
 
-WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN useradd --create-home appuser
+WORKDIR /home/appuser
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt || echo 'No packages'
+RUN pip install --no-cache-dir -r requirements.txt
 
-COPY main.py .
+COPY . .
+
+USER appuser
 
 CMD ["python", "main.py"]
