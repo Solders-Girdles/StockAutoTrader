@@ -1,117 +1,111 @@
 #!/usr/bin/env python3
 """
-test_trade_executor.py
+trade_executor.py
 
-Unit tests for the trade_executor module, using mocks to simulate broker API responses
-and validate trade execution logic including partial fills.
+This module contains the core logic for executing trades by interfacing with the broker API.
+It validates trade requests, calls the broker API (or its simulation), and logs execution details.
+It now also logs an initial PENDING event and returns a list of execution events.
 """
 
-import unittest
-from unittest.mock import patch
+import json
+import logging
+import traceback
+import uuid
 from datetime import datetime
+from typing import Dict, List
 
-from trade_executor import execute_trade
+from broker_api import send_order
 
-class TestTradeExecutor(unittest.TestCase):
+logger = logging.getLogger("ExecConnect.TradeExecutor")
+logger.setLevel(logging.INFO)
 
-    @patch('trade_executor.send_order')
-    def test_execute_trade_success_full(self, mock_send_order):
-        trade = {
-            "symbol": "AAPL",
+
+def execute_trade(trade: Dict) -> List[Dict]:
+    """
+    Executes a trade by sending an order via the broker API.
+    Logs an initial "PENDING" state event, then sends the order and returns a list of execution events.
+    Each event (including partial fill events) includes order_id, status, filled_quantity, avg_price,
+    timestamp, remaining_quantity, and order_state.
+
+    Parameters:
+        trade (dict): A dictionary with keys such as 'symbol', 'action', 'price', 'quantity',
+                      'risk_approved', and optionally 'correlation_id' for traceability.
+
+    Returns:
+        List[Dict]: A list of execution event dictionaries, including an initial "PENDING" event.
+    """
+    # Ensure a consistent order_id across events.
+    if "order_id" not in trade:
+        trade["order_id"] = str(uuid.uuid4())
+
+    pending_event = {
+        "order_id": trade["order_id"],
+        "status": "PENDING",
+        "filled_quantity": 0,
+        "avg_price": 0.0,
+        "timestamp": datetime.utcnow().isoformat(),
+        "remaining_quantity": trade.get("quantity"),
+        "order_state": "PENDING"
+    }
+    logger.info(json.dumps({
+        "timestamp": datetime.utcnow().isoformat(),
+        "level": "INFO",
+        "service": "ExecConnect.TradeExecutor",
+        "message": "Trade pending",
+        "execution_event": pending_event,
+        "correlation_id": trade.get("correlation_id")
+    }))
+
+    try:
+        result = send_order(trade)
+        # The send_order function returns a dict with a key "events" (a list of events).
+        events = result.get("events")
+        # Ensure all events use the same order_id.
+        for event in events:
+            event["order_id"] = trade["order_id"]
+        logger.info(json.dumps({
             "timestamp": datetime.utcnow().isoformat(),
-            "action": "BUY",
-            "price": 150.0,
-            "quantity": 10,
-            "risk_approved": True,
-            "correlation_id": "corr-123",
-            "scenario": "full"
-        }
-        mock_send_order.return_value = {
-            "events": [{
-                "order_id": trade.get("order_id", "SIM-123"),
-                "status": "FILLED",
-                "filled_quantity": 10,
-                "avg_price": 150.0,
-                "timestamp": datetime.utcnow().isoformat(),
-                "remaining_quantity": 0,
-                "order_state": "FILLED"
-            }]
-        }
-        events = execute_trade(trade)
-        # Expect a pending event plus the filled event.
-        self.assertEqual(len(events), 2)
-        self.assertEqual(events[1]['status'], "FILLED")
-        self.assertEqual(events[1]['filled_quantity'], 10)
-
-    @patch('trade_executor.send_order')
-    def test_execute_trade_success_partial(self, mock_send_order):
-        trade = {
-            "symbol": "AAPL",
+            "level": "INFO",
+            "service": "ExecConnect.TradeExecutor",
+            "message": "Trade execution events",
+            "execution_events": events,
+            "correlation_id": trade.get("correlation_id")
+        }))
+        return [pending_event] + events
+    except Exception as e:
+        log_msg = {
             "timestamp": datetime.utcnow().isoformat(),
-            "action": "BUY",
-            "price": 150.0,
-            "quantity": 10,
-            "risk_approved": True,
-            "correlation_id": "corr-456",
-            "scenario": "partial"
+            "level": "ERROR",
+            "service": "ExecConnect.TradeExecutor",
+            "message": f"Error executing trade: {str(e)}",
+            "stack_trace": traceback.format_exc(),
+            "correlation_id": trade.get("correlation_id")
         }
-        mock_send_order.return_value = {
-            "events": [
-                {
-                    "order_id": trade.get("order_id", "SIM-456"),
-                    "status": "PARTIALLY_FILLED",
-                    "filled_quantity": 6,
-                    "avg_price": 150.05,
-                    "timestamp": datetime.utcnow().isoformat(),
-                    "remaining_quantity": 4,
-                    "order_state": "PARTIALLY_FILLED"
-                },
-                {
-                    "order_id": trade.get("order_id", "SIM-456"),
-                    "status": "FILLED",
-                    "filled_quantity": 10,
-                    "avg_price": 150.0,
-                    "timestamp": datetime.utcnow().isoformat(),
-                    "remaining_quantity": 0,
-                    "order_state": "FILLED"
-                }
-            ]
-        }
-        events = execute_trade(trade)
-        # Expect a pending event plus two events from partial fill simulation.
-        self.assertEqual(len(events), 3)
-        self.assertEqual(events[1]['status'], "PARTIALLY_FILLED")
-        self.assertEqual(events[2]['status'], "FILLED")
-        self.assertEqual(events[1]['filled_quantity'] + (10 - events[1]['filled_quantity']), 10)
+        logger.error(json.dumps(log_msg))
+        raise
 
-    @patch('trade_executor.send_order')
-    def test_execute_trade_failure(self, mock_send_order):
-        trade = {
-            "symbol": "AAPL",
+
+def log_trade_execution(execution_event: Dict) -> None:
+    """
+    Logs a single trade execution event.
+    In production, this might write to a database; here we use structured JSON logging.
+
+    Parameters:
+        execution_event (dict): The trade execution event to log.
+    """
+    try:
+        logger.info(json.dumps({
             "timestamp": datetime.utcnow().isoformat(),
-            "action": "BUY",
-            "price": 150.0,
-            "quantity": 10,
-            "risk_approved": False,
-            "correlation_id": "corr-789",
-            "scenario": "full"
-        }
-        mock_send_order.return_value = {
-            "events": [{
-                "order_id": trade.get("order_id", "SIM-789"),
-                "status": "REJECTED",
-                "filled_quantity": 0,
-                "avg_price": 150.0,
-                "timestamp": datetime.utcnow().isoformat(),
-                "remaining_quantity": 10,
-                "order_state": "REJECTED"
-            }]
-        }
-        events = execute_trade(trade)
-        # Expect a pending event plus the rejected event.
-        self.assertEqual(len(events), 2)
-        self.assertEqual(events[1]['status'], "REJECTED")
-        self.assertEqual(events[1]['filled_quantity'], 0)
-
-if __name__ == '__main__':
-    unittest.main()
+            "level": "INFO",
+            "service": "ExecConnect.TradeExecutor",
+            "message": "Logging trade execution event",
+            "execution_event": execution_event
+        }))
+    except Exception as e:
+        logger.error(json.dumps({
+            "timestamp": datetime.utcnow().isoformat(),
+            "level": "ERROR",
+            "service": "ExecConnect.TradeExecutor",
+            "message": f"Error logging trade execution event: {str(e)}",
+            "stack_trace": traceback.format_exc()
+        }))

@@ -71,7 +71,6 @@ class TestRiskEvaluator(unittest.TestCase):
         self.assertFalse(evaluate_trade(signal, self.portfolio))
 
     def test_trade_rejected_exposure_limit(self):
-        # Buying additional 100 shares at $150 each would exceed 10% of total capital (i.e., 10000).
         signal = {
             "symbol": "AAPL",
             "action": "BUY",
@@ -91,7 +90,6 @@ class TestRiskEvaluator(unittest.TestCase):
             "confidence": 0.95,
             "asset_class": "equity"
         }
-        # Force stress test rejection by setting a very low threshold.
         self.assertFalse(evaluate_trade(signal, self.portfolio, stress_threshold_pct=0.01))
 
     def test_trade_rejected_extreme_volatility(self):

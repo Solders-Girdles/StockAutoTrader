@@ -10,9 +10,11 @@ logs each execution event, and stores the results (including order state changes
 import os
 import json
 import logging
+import time
 import traceback
 from datetime import datetime
 from typing import Dict, Any
+from concurrent.futures import ThreadPoolExecutor
 
 import pika
 import psycopg2
@@ -22,6 +24,7 @@ from trade_executor import execute_trade, log_trade_execution
 logger = logging.getLogger("ExecConnect.Main")
 logger.setLevel(logging.INFO)
 
+# Environment variables – ensure these match your docker-compose configuration.
 RABBITMQ_HOST = os.environ.get("RABBITMQ_HOST", "localhost")
 RABBITMQ_USER = os.environ.get("RABBITMQ_USER", "guest")
 RABBITMQ_PASS = os.environ.get("RABBITMQ_PASS", "guest")
@@ -30,6 +33,10 @@ DB_HOST = os.environ.get("DB_HOST", "localhost")
 DB_USER = os.environ.get("DB_USER", "postgres")
 DB_PASS = os.environ.get("DB_PASS", "")
 DB_NAME = os.environ.get("DB_NAME", "trading")
+
+# Global thread pool for concurrent processing.
+executor = ThreadPoolExecutor(max_workers=5)
+
 
 def get_db_connection():
     """
@@ -61,6 +68,7 @@ def get_db_connection():
         logger.error(json.dumps(log_msg))
         raise
 
+
 def init_db(conn):
     """
     Initialize the 'trades' table if it does not exist.
@@ -90,6 +98,7 @@ def init_db(conn):
     }
     logger.info(json.dumps(log_msg))
 
+
 def insert_trade_update(conn, trade_event: Dict[str, Any]) -> None:
     """
     Insert a trade execution event into the 'trades' table.
@@ -108,7 +117,8 @@ def insert_trade_update(conn, trade_event: Dict[str, Any]) -> None:
     remaining_quantity = trade_event.get("remaining_quantity", 0)
     order_state = trade_event.get("order_state", status)
     with conn.cursor() as cur:
-        cur.execute(insert_query, (order_id, symbol, status, filled_quantity, avg_price, execution_timestamp, remaining_quantity, order_state))
+        cur.execute(insert_query, (
+        order_id, symbol, status, filled_quantity, avg_price, execution_timestamp, remaining_quantity, order_state))
         conn.commit()
     log_msg = {
         "timestamp": datetime.utcnow().isoformat(),
@@ -119,55 +129,90 @@ def insert_trade_update(conn, trade_event: Dict[str, Any]) -> None:
     }
     logger.info(json.dumps(log_msg))
 
+
 def process_message(ch, method, properties, body, db_conn):
     """
     Callback to process messages from RabbitMQ.
     Consumes an approved trade, executes the trade (logging pending and fill events),
     and stores each event in Postgres.
     """
-    try:
-        message = json.loads(body.decode())
-        logger.info(json.dumps({
-            "timestamp": datetime.utcnow().isoformat(),
-            "level": "INFO",
-            "service": "ExecConnect.Main",
-            "message": "Received approved trade",
-            "trade": message
-        }))
-        execution_events = execute_trade(message)
-        for event in execution_events:
-            log_trade_execution(event)
-            insert_trade_update(db_conn, event)
-        ch.basic_ack(delivery_tag=method.delivery_tag)
-    except Exception as e:
-        logger.error(json.dumps({
-            "timestamp": datetime.utcnow().isoformat(),
-            "level": "ERROR",
-            "service": "ExecConnect.Main",
-            "message": f"Error processing message: {str(e)}",
-            "stack_trace": traceback.format_exc()
-        }))
-        ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
+
+    def task():
+        try:
+            message = json.loads(body.decode())
+            logger.info(json.dumps({
+                "timestamp": datetime.utcnow().isoformat(),
+                "level": "INFO",
+                "service": "ExecConnect.Main",
+                "message": "Received approved trade",
+                "trade": message
+            }))
+            execution_events = execute_trade(message)
+            for event in execution_events:
+                log_trade_execution(event)
+                insert_trade_update(db_conn, event)
+            ch.connection.add_callback_threadsafe(lambda: ch.basic_ack(delivery_tag=method.delivery_tag))
+        except Exception as e:
+            logger.error(json.dumps({
+                "timestamp": datetime.utcnow().isoformat(),
+                "level": "ERROR",
+                "service": "ExecConnect.Main",
+                "message": f"Error processing message: {str(e)}",
+                "stack_trace": traceback.format_exc()
+            }))
+            ch.connection.add_callback_threadsafe(
+                lambda: ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False))
+
+    executor.submit(task)
+
 
 def main():
     db_conn = get_db_connection()
     init_db(db_conn)
+
     credentials = pika.PlainCredentials(RABBITMQ_USER, RABBITMQ_PASS)
     parameters = pika.ConnectionParameters(host=RABBITMQ_HOST, credentials=credentials)
-    connection = pika.BlockingConnection(parameters)
+
+    # Retry RabbitMQ connection until successful.
+    connection = None
+    while not connection:
+        try:
+            connection = pika.BlockingConnection(parameters)
+            logger.info(json.dumps({
+                "timestamp": datetime.utcnow().isoformat(),
+                "level": "INFO",
+                "service": "ExecConnect.Main",
+                "message": "Connected to RabbitMQ!"
+            }))
+        except Exception as e:
+            logger.error(json.dumps({
+                "timestamp": datetime.utcnow().isoformat(),
+                "level": "ERROR",
+                "service": "ExecConnect.Main",
+                "message": f"Failed to connect to RabbitMQ: {str(e)}. Retrying in 5 seconds...",
+                "stack_trace": traceback.format_exc()
+            }))
+            time.sleep(5)
+
     channel = connection.channel()
     queue_name = "approved_trades"
+    # Declare the queue as durable.
     channel.queue_declare(queue=queue_name, durable=True)
+    # Set prefetch count to allow for concurrent processing.
+    channel.basic_qos(prefetch_count=5)
+
     logger.info(json.dumps({
         "timestamp": datetime.utcnow().isoformat(),
         "level": "INFO",
         "service": "ExecConnect.Main",
         "message": f"Waiting for messages in queue '{queue_name}'."
     }))
+
     channel.basic_consume(
         queue=queue_name,
         on_message_callback=lambda ch, method, props, body: process_message(ch, method, props, body, db_conn)
     )
+
     try:
         channel.start_consuming()
     except KeyboardInterrupt:
@@ -181,6 +226,7 @@ def main():
         channel.stop_consuming()
         connection.close()
         db_conn.close()
+
 
 if __name__ == "__main__":
     main()

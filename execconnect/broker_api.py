@@ -8,27 +8,21 @@ with retry logic, circuit-breaker and timeout wrapping, and standardized JSON lo
 Real Broker Sandbox Integration (Example: Alpaca Paper Trading API)
 --------------------------------------------------------------------
 Authentication:
-  - API credentials are provided via the environment variables:
-      ALPACA_API_KEY, ALPACA_SECRET_KEY, ALPACA_BASE_URL
+  - API credentials are provided via environment variables: ALPACA_API_KEY, ALPACA_SECRET_KEY, ALPACA_BASE_URL.
   - For Alpaca, the base URL is typically "https://paper-api.alpaca.markets".
 
 Order Submission Endpoint:
-  - Orders are submitted via the Alpaca REST API (see alpaca_trade_api library).
+  - Orders are submitted via the Alpaca REST API (using the alpaca_trade_api library).
   - Example endpoint: POST /v2/orders
-  - Order parameters include symbol, quantity, side, order type (here we use "limit"), limit_price, and time_in_force ("gtc").
+  - Order parameters include symbol, quantity, side, order type (here "limit"), limit_price, and time_in_force ("gtc").
 
 Rate Limits / Throttling:
-  - Refer to the broker’s documentation for rate limits. Our retry logic with exponential backoff
-    (2, 4, 8 seconds) and a simple circuit breaker (threshold 3, recovery timeout 30 seconds) are in place
-    to help avoid overwhelming the API.
+  - Refer to the broker’s documentation. Our retry logic with exponential backoff (2, 4, 8 seconds)
+    and a simple circuit breaker (threshold 3, recovery timeout 30 seconds) help avoid overwhelming the API.
 
 Advanced Order Types:
-  - While the current implementation focuses on basic limit orders, this module can be extended.
-  - For example, to support stop-loss or OCO orders, additional fields (like 'stop_price', 'order_type')
-    would be added to the trade message and mapped to the broker’s API.
-  - In simulation mode (see simulate_order), you could branch based on trade.get("order_type") to mimic
-    more complex behaviors.
-
+  - For now, we support basic limit orders. In simulation mode, if trade.get("order_type") is provided,
+    additional logic can be added to mimic stop-loss or bracket orders.
 """
 
 import os
@@ -250,10 +244,9 @@ def simulate_order(trade: Dict) -> Dict:
     base_timestamp = datetime.utcnow().isoformat()
 
     # Advanced Order Types simulation (for future extension):
-    # If trade.get("order_type") is provided (e.g., "limit", "stop-loss"), additional simulation logic could be applied.
     if trade.get("order_type"):
-        # Here you would simulate order behavior specific to the advanced type.
-        pass  # Placeholder for advanced order type simulation.
+        # Additional logic for advanced order types (e.g., stop-loss, OCO) would go here.
+        pass
 
     if scenario == "partial":
         if trade["quantity"] > 1:

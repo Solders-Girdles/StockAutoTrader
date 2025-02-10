@@ -3,17 +3,24 @@
 main.py
 
 Main Entry Point for RiskOps Service:
-- Receives trade signals (simulated for demonstration).
-- Uses risk.py to perform comprehensive risk checks (including multi-asset risk, exposure limits, circuit breakers, VaR, and stress tests).
+- Receives trade signals from the durable "trade_signals" queue.
+- Uses risk.py to perform comprehensive risk checks (multi-asset risk, exposure limits, circuit breakers,
+  VaR, stress tests, and extended scenario codes).
 - If approved, updates an in-memory portfolio and publishes the approved trade via mq_util.
-- Generates an automated daily risk report via reporting.py.
+- Implements a consumer that ACKs messages on successful processing and NACKs them on errors.
+- Incorporates a retry/backoff loop to handle situations where RabbitMQ is slow to initialize.
 - Logs every step with explicit JSON fields (timestamp, level, service, message, correlation_id).
 """
 
 import os
+import sys
 import json
+import time
 import logging
 from datetime import datetime, timezone
+
+import pika
+from pika.exceptions import AMQPConnectionError, AMQPChannelError
 
 from risk import evaluate_trade
 from mq_util import publish_message
@@ -38,7 +45,7 @@ def process_trade_signal(signal: dict, correlation_id: str = None) -> None:
 
     Args:
         signal (dict): Trade signal with required keys.
-        correlation_id (str): Optional correlation ID to trace the trade across services.
+        correlation_id (str): Optional correlation ID for tracing.
     """
     try:
         logger.info(json.dumps({
@@ -106,33 +113,90 @@ def process_trade_signal(signal: dict, correlation_id: str = None) -> None:
             "error": str(e),
             "correlation_id": correlation_id
         }))
+        # Propagate exception so that the consumer can NACK the message.
+        raise
+
+def consume_trade_signals():
+    """
+    Set up a RabbitMQ consumer to process messages from the durable "trade_signals" queue.
+    Implements a retry loop with exponential backoff to handle connection issues (e.g., RabbitMQ slow to initialize).
+
+    Failover Strategy:
+      - Partial Failover: On restart, pending messages in the durable queue are processed immediately.
+      - Full Failover: If RiskOps is down, messages accumulate and are processed upon recovery.
+      - Stale messages can be filtered via application logic or queue policies.
+    """
+    parameters = pika.ConnectionParameters(
+        host=os.environ.get("RABBITMQ_HOST", "localhost"),
+        credentials=pika.PlainCredentials(
+            os.environ.get("RABBITMQ_USER", "guest"),
+            os.environ.get("RABBITMQ_PASS", "guest")
+        )
+    )
+    max_retries = 10
+    retry_delay = 1
+    for attempt in range(1, max_retries + 1):
+        try:
+            connection = pika.BlockingConnection(parameters)
+            channel = connection.channel()
+            channel.queue_declare(queue="trade_signals", durable=True)
+            channel.basic_qos(prefetch_count=1)
+            channel.basic_consume(queue="trade_signals", on_message_callback=on_message_callback)
+            logger.info("Started consuming from 'trade_signals' queue.")
+            channel.start_consuming()
+            break  # Exit loop on successful consumption.
+        except (AMQPConnectionError, AMQPChannelError) as e:
+            logger.exception("RabbitMQ connection/channel error during consumer setup: %s", e)
+            time.sleep(retry_delay)
+            retry_delay *= 2
+        except Exception as e:
+            logger.exception("Unexpected error in consumer setup: %s", e)
+            time.sleep(retry_delay)
+            retry_delay *= 2
+
+def on_message_callback(channel, method_frame, header_frame, body):
+    """
+    Callback for RabbitMQ consumer.
+    Processes the incoming trade signal; ACKs if processing succeeds,
+    otherwise NACKs the message (without requeueing) to route it to a dead-letter queue.
+    """
+    try:
+        signal = json.loads(body)
+        correlation_id = signal.get("correlation_id", "from_consumer")
+        process_trade_signal(signal, correlation_id=correlation_id)
+        channel.basic_ack(delivery_tag=method_frame.delivery_tag)
+    except Exception as e:
+        logger.exception("Error processing message: %s", e)
+        channel.basic_nack(delivery_tag=method_frame.delivery_tag, requeue=False)
 
 def main():
-    # For demonstration, simulate consuming a multi-asset trade signal.
-    sample_signal = {
-        "symbol": "AAPL",
-        "timestamp": "2025-02-07T12:00:00Z",
-        "action": "BUY",
-        "price": 150.0,
-        "desired_quantity": 50,
-        "confidence": 0.80,
-        "asset_class": "equity",
-        "vix": 25  # Normal volatility; if >30, would be rejected.
-    }
-    correlation_id = "abc123"
-    process_trade_signal(sample_signal, correlation_id=correlation_id)
-
-    # Generate and log a daily risk report.
-    from reporting import generate_daily_risk_report
-    report = generate_daily_risk_report(portfolio_data)
-    logger.info(json.dumps({
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "level": "INFO",
-        "service": "RiskOpsMain",
-        "message": "Daily risk report generated.",
-        "report": report,
-        "correlation_id": correlation_id
-    }))
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "consume":
+        consume_trade_signals()
+    else:
+        # For demonstration, simulate processing a single trade signal.
+        sample_signal = {
+            "symbol": "AAPL",
+            "timestamp": "2025-02-07T12:00:00Z",
+            "action": "BUY",
+            "price": 150.0,
+            "desired_quantity": 50,
+            "confidence": 0.80,
+            "asset_class": "equity",
+            "vix": 25
+        }
+        correlation_id = "abc123"
+        process_trade_signal(sample_signal, correlation_id=correlation_id)
+        from reporting import generate_daily_risk_report
+        report = generate_daily_risk_report(portfolio_data)
+        logger.info(json.dumps({
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "level": "INFO",
+            "service": "RiskOpsMain",
+            "message": "Daily risk report generated.",
+            "report": report,
+            "correlation_id": correlation_id
+        }))
 
 if __name__ == "__main__":
     main()

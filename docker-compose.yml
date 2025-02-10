@@ -1,4 +1,4 @@
-version: "3.8"
+# docker-compose.yml
 
 services:
   # -------------------------------------------------
@@ -41,15 +41,14 @@ services:
       - rabbitmq
       - db
     environment:
-      # RabbitMQ connection info
       RABBITMQ_HOST: rabbitmq
       RABBITMQ_USER: myuser
       RABBITMQ_PASS: mypass
-      # Postgres connection info (if needed in DataFlow)
       DB_HOST: db
       DB_USER: myuser
       DB_PASS: mypass
       DB_NAME: traderdb
+      POLYGON_API_KEY: "YOUR_POLYGON_API_KEY_HERE"  # Add your real key or a placeholder
     networks:
       - tradingnet
 
