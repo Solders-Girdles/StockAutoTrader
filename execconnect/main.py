@@ -9,7 +9,17 @@ logs each execution event, and stores the results (including order state changes
 
 import os
 import json
-import logging
+from common.logging_helper import get_logger
+
+# Initialize the logger with the appropriate service name
+logger = get_logger("ExecConnect")
+
+def on_message(channel, method, properties, body):
+    # Extract correlation_id if present
+    correlation_id = properties.headers.get('correlation_id') if properties and properties.headers else 'UNKNOWN'
+    logger.info("Received event", extra={'correlation_id': correlation_id})
+    # Acknowledge the message
+    channel.basic_ack(delivery_tag=method.delivery_tag)
 import time
 import traceback
 from datetime import datetime

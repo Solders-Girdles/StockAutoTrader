@@ -1,10 +1,10 @@
-# common.py
+# quant/common.py
 import os
 import json
 import time
 import traceback
 from datetime import datetime
-from logging_helper import log_json
+from common.logging_helper import log_json  # Updated import
 import pika
 
 def process_market_data(data: dict) -> dict:

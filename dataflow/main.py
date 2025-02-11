@@ -39,8 +39,15 @@ Usage:
 import os
 import time
 import json
-import datetime
-import logging
+from datetime import datetime, timezone
+from common.logging_helper import get_logger
+
+# Initialize the logger for DataFlow with the service name
+logger = get_logger("DataFlow")
+
+# Now you can use logger.info(), logger.error(), etc.
+logger.info("Publishing a market data event", extra={'correlation_id': 'your-correlation-id'})
+
 import random
 import sys
 import uuid
@@ -62,20 +69,8 @@ import pybreaker
 import unittest
 from unittest.mock import patch, MagicMock
 
-# --- Structured JSON Logging Configuration ---
-logger = logging.getLogger("DataFlow")
-logger.setLevel(logging.INFO)
-stream_handler = logging.StreamHandler()
-formatter = jsonlogger.JsonFormatter(
-    fmt='%(asctime)s %(name)s %(levelname)s %(message)s',
-    rename_fields={'asctime': 'timestamp', 'name': 'service', 'levelname': 'level', 'message': 'message'}
-)
-stream_handler.setFormatter(formatter)
-logger.handlers = []
-logger.addHandler(stream_handler)
-
 # --- Environment Variables & Configuration ---
-POLYGON_API_KEY = os.environ.get("POLYGON_API_KEY")
+POLYGON_API_KEY = os.environ.get("d5Wst8dKFQRQ8yTJpsPiV1a9wzHzwF4K")
 SECONDARY_POLYGON_BASE_URL = os.environ.get("SECONDARY_POLYGON_BASE_URL", "https://secondary-api.polygon.io/v2/last/trade")
 RABBITMQ_HOST = os.environ.get("RABBITMQ_HOST", "localhost")
 RABBITMQ_USER = os.environ.get("RABBITMQ_USER", "guest")
@@ -123,6 +118,7 @@ def validate_market_data(data: dict) -> dict:
         if field not in data:
             if "price" in data:
                 data[field] = data["price"]
+                is_partial = True  # Mark as partial because the extended field was missing.
             else:
                 logger.warning("Missing '%s' for %s; marking as partial.", field, data["symbol"])
                 data[field] = 0.0
@@ -193,7 +189,7 @@ class PolygonService:
             logger.warning("Primary: Timestamp missing for %s; using current time.", symbol)
             timestamp = datetime.datetime.utcnow().isoformat()
         else:
-            timestamp = datetime.datetime.utcfromtimestamp(timestamp_ms / 1000.0).isoformat()
+            timestamp = datetime.fromtimestamp(timestamp_ms / 1000.0, tz=timezone.utc).isoformat()
         if "open" in last_trade:
             open_val = last_trade.get("open")
             high_val = last_trade.get("high")
@@ -280,7 +276,7 @@ class SecondaryPolygonService:
             logger.warning("Secondary: Timestamp missing for %s; using current time.", symbol)
             timestamp = datetime.datetime.utcnow().isoformat()
         else:
-            timestamp = datetime.datetime.utcfromtimestamp(timestamp_ms / 1000.0).isoformat()
+            datetime.fromtimestamp(timestamp_ms / 1000.0, tz=timezone.utc).isoformat()
         if "open" in last_trade:
             open_val = last_trade.get("open")
             high_val = last_trade.get("high")
@@ -415,7 +411,7 @@ def main_publisher():
     start_http_server(8000)
     logger.info("Started Prometheus metrics server on port 8000")
 
-    primary_service = PolygonService(api_key=POLYGON_API_KEY)
+    primary_service = PolygonService("d5Wst8dKFQRQ8yTJpsPiV1a9wzHzwF4K")
     secondary_service = SecondaryPolygonService(api_key=POLYGON_API_KEY, base_url=SECONDARY_POLYGON_BASE_URL)
     publisher = RabbitMQPublisher(host=RABBITMQ_HOST, user=RABBITMQ_USER, password=RABBITMQ_PASS, queue="market_data")
 

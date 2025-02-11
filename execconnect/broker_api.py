@@ -31,9 +31,7 @@ import time
 import logging
 import traceback
 import uuid
-from datetime import datetime
-from typing import Dict
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+from datetime import datetime, timezone
 
 # Attempt to import the Alpaca API; if unavailable, fall back to simulation.
 try:
@@ -91,7 +89,7 @@ circuit_breaker = CircuitBreaker(failure_threshold=3, recovery_timeout=30)
 BROKER_API_TIMEOUT = 10
 
 
-def _send_order_api_call(trade: Dict) -> Dict:
+def _send_order_api_call(trade: dict) -> dict:
     """
     Internal function to send an order to the broker API.
     This function is wrapped by the circuit breaker and timeout logic.
@@ -110,14 +108,14 @@ def _send_order_api_call(trade: Dict) -> Dict:
         "status": order.status.upper(),
         "filled_quantity": int(order.filled_qty),
         "avg_price": float(order.filled_avg_price) if order.filled_avg_price else trade['price'],
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "remaining_quantity": trade['quantity'] - int(order.filled_qty),
         "order_state": order.status.upper()
     }
     return execution_result
 
 
-def send_order(trade: Dict, max_retries: int = 3) -> Dict:
+def send_order(trade: dict, max_retries: int = 3) -> dict:
     """
     Sends an order to the broker API using Alpaca (if configured) with timeout and circuit breaker logic.
     Includes retry logic for transient connectivity issues.
@@ -134,7 +132,7 @@ def send_order(trade: Dict, max_retries: int = 3) -> Dict:
     while attempt <= max_retries:
         try:
             log_msg = {
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "level": "INFO",
                 "service": "ExecConnect.BrokerAPI",
                 "message": f"Sending order, attempt {attempt}",
@@ -148,12 +146,13 @@ def send_order(trade: Dict, max_retries: int = 3) -> Dict:
                 return simulate_order(trade)
 
             # Wrap the API call with circuit breaker and timeout.
+            from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
             with ThreadPoolExecutor(max_workers=1) as executor:
                 future = executor.submit(lambda: circuit_breaker.call(_send_order_api_call, trade))
                 result = future.result(timeout=BROKER_API_TIMEOUT)
 
             log_msg = {
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "level": "INFO",
                 "service": "ExecConnect.BrokerAPI",
                 "message": "Order sent successfully",
@@ -166,7 +165,7 @@ def send_order(trade: Dict, max_retries: int = 3) -> Dict:
         except FuturesTimeoutError:
             delay = 2 ** attempt
             log_msg = {
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "level": "ERROR",
                 "service": "ExecConnect.BrokerAPI",
                 "message": f"Broker API call timed out on attempt {attempt}",
@@ -180,7 +179,7 @@ def send_order(trade: Dict, max_retries: int = 3) -> Dict:
         except (AMQPConnectionError, AMQPChannelError) as e:
             delay = 2 ** attempt
             log_msg = {
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "level": "ERROR",
                 "service": "ExecConnect.BrokerAPI",
                 "message": f"Broker connectivity error on attempt {attempt}: {str(e)}",
@@ -194,7 +193,7 @@ def send_order(trade: Dict, max_retries: int = 3) -> Dict:
 
         except Exception as e:
             log_msg = {
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "level": "ERROR",
                 "service": "ExecConnect.BrokerAPI",
                 "message": f"Unexpected error sending order: {str(e)}",
@@ -209,12 +208,12 @@ def send_order(trade: Dict, max_retries: int = 3) -> Dict:
         "status": "FAILED",
         "filled_quantity": 0,
         "avg_price": 0.0,
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "remaining_quantity": trade.get("quantity", 0),
         "order_state": "FAILED"
     }
     log_msg = {
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "level": "ERROR",
         "service": "ExecConnect.BrokerAPI",
         "message": "All broker API retries failed",
@@ -225,7 +224,7 @@ def send_order(trade: Dict, max_retries: int = 3) -> Dict:
     return default_result
 
 
-def simulate_order(trade: Dict) -> Dict:
+def simulate_order(trade: dict) -> dict:
     """
     Simulate an order execution when the broker API is not configured.
     Supports simulation of full and partial fills based on the 'scenario' key.
@@ -241,7 +240,7 @@ def simulate_order(trade: Dict) -> Dict:
     scenario = trade.get("scenario", "full").lower()
     risk_approved = trade.get("risk_approved", False)
     order_id = trade.get("order_id", f"SIM-{uuid.uuid4()}")
-    base_timestamp = datetime.utcnow().isoformat()
+    base_timestamp = datetime.now(timezone.utc).isoformat()
 
     # Advanced Order Types simulation (for future extension):
     if trade.get("order_type"):
@@ -262,7 +261,7 @@ def simulate_order(trade: Dict) -> Dict:
             "remaining_quantity": trade["quantity"] - first_fill,
             "order_state": "PARTIALLY_FILLED"
         }
-        final_timestamp = datetime.utcnow().isoformat()
+        final_timestamp = datetime.now(timezone.utc).isoformat()
         final_event = {
             "order_id": order_id,
             "status": "FILLED",

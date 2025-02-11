@@ -6,14 +6,23 @@ from datetime import datetime
 from typing import Dict, Any, List
 import time
 import pika
-import psycopg2
-from logging_helper import log_json
-from strategies import (
+from common.logging_helper import get_logger
+
+# Initialize the logger with the appropriate service name
+logger = get_logger("Quant")
+
+def on_message(channel, method, properties, body):
+    # Extract correlation_id if present
+    correlation_id = properties.headers.get('correlation_id') if properties and properties.headers else 'UNKNOWN'
+    logger.info("Received event", extra={'correlation_id': correlation_id})
+    # Acknowledge the message
+    channel.basic_ack(delivery_tag=method.delivery_tag)
+from .strategies import (
     SymbolStrategy, MeanReversionMomentumStrategy, MLSignalStrategy,
     MACDStrategy, BollingerBandsStrategy, RSIIndicator, aggregate_signals
 )
-from common import process_market_data, compute_signal, publish_trade_signal, get_rabbitmq_connection
-from performance import PerformanceTracker
+from .common import process_market_data, compute_signal, publish_trade_signal, get_rabbitmq_connection
+from .performance import PerformanceTracker
 
 # Global load metrics.
 message_count = 0

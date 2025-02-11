@@ -11,16 +11,14 @@ import json
 import logging
 import traceback
 import uuid
-from datetime import datetime
-from typing import Dict, List
-
-from broker_api import send_order
+from datetime import datetime, timezone
+from execconnect.broker_api import send_order  # Alternatively, use a relative import: from .broker_api import send_order
 
 logger = logging.getLogger("ExecConnect.TradeExecutor")
 logger.setLevel(logging.INFO)
 
 
-def execute_trade(trade: Dict) -> List[Dict]:
+def execute_trade(trade: dict) -> list:
     """
     Executes a trade by sending an order via the broker API.
     Logs an initial "PENDING" state event, then sends the order and returns a list of execution events.
@@ -32,7 +30,7 @@ def execute_trade(trade: Dict) -> List[Dict]:
                       'risk_approved', and optionally 'correlation_id' for traceability.
 
     Returns:
-        List[Dict]: A list of execution event dictionaries, including an initial "PENDING" event.
+        list: A list of execution event dictionaries, including an initial "PENDING" event.
     """
     # Ensure a consistent order_id across events.
     if "order_id" not in trade:
@@ -43,12 +41,12 @@ def execute_trade(trade: Dict) -> List[Dict]:
         "status": "PENDING",
         "filled_quantity": 0,
         "avg_price": 0.0,
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "remaining_quantity": trade.get("quantity"),
         "order_state": "PENDING"
     }
     logger.info(json.dumps({
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "level": "INFO",
         "service": "ExecConnect.TradeExecutor",
         "message": "Trade pending",
@@ -64,7 +62,7 @@ def execute_trade(trade: Dict) -> List[Dict]:
         for event in events:
             event["order_id"] = trade["order_id"]
         logger.info(json.dumps({
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "level": "INFO",
             "service": "ExecConnect.TradeExecutor",
             "message": "Trade execution events",
@@ -74,7 +72,7 @@ def execute_trade(trade: Dict) -> List[Dict]:
         return [pending_event] + events
     except Exception as e:
         log_msg = {
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "level": "ERROR",
             "service": "ExecConnect.TradeExecutor",
             "message": f"Error executing trade: {str(e)}",
@@ -85,7 +83,7 @@ def execute_trade(trade: Dict) -> List[Dict]:
         raise
 
 
-def log_trade_execution(execution_event: Dict) -> None:
+def log_trade_execution(execution_event: dict) -> None:
     """
     Logs a single trade execution event.
     In production, this might write to a database; here we use structured JSON logging.
@@ -95,7 +93,7 @@ def log_trade_execution(execution_event: Dict) -> None:
     """
     try:
         logger.info(json.dumps({
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "level": "INFO",
             "service": "ExecConnect.TradeExecutor",
             "message": "Logging trade execution event",
@@ -103,7 +101,7 @@ def log_trade_execution(execution_event: Dict) -> None:
         }))
     except Exception as e:
         logger.error(json.dumps({
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "level": "ERROR",
             "service": "ExecConnect.TradeExecutor",
             "message": f"Error logging trade execution event: {str(e)}",

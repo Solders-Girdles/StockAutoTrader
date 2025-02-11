@@ -4,7 +4,7 @@ main.py
 
 Main Entry Point for RiskOps Service:
 - Receives trade signals from the durable "trade_signals" queue.
-- Uses risk.py to perform comprehensive risk checks (multi-asset risk, exposure limits, circuit breakers,
+- Uses risk checks from risk.py to evaluate trade risk (multi-asset risk, exposure limits, circuit breakers,
   VaR, stress tests, and extended scenario codes).
 - If approved, updates an in-memory portfolio and publishes the approved trade via mq_util.
 - Implements a consumer that ACKs messages on successful processing and NACKs them on errors.
@@ -16,20 +16,19 @@ import os
 import sys
 import json
 import time
-import logging
 from datetime import datetime, timezone
-
 import pika
 from pika.exceptions import AMQPConnectionError, AMQPChannelError
 
-from risk import evaluate_trade
-from mq_util import publish_message
+# Use the common logging helper instead of directly configuring the standard logging module.
+from common.logging_helper import get_logger
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s"
-)
-logger = logging.getLogger("RiskOpsMain")
+# Use relative imports for internal modules.
+from .risk import evaluate_trade
+from .mq_util import publish_message
+
+# Initialize the logger using the logging helper.
+logger = get_logger("RiskOpsMain")
 
 # Simulated portfolio data for risk checks.
 portfolio_data = {
@@ -84,7 +83,6 @@ def process_trade_signal(signal: dict, correlation_id: str = None) -> None:
                     "available_margin": portfolio_data["available_margin"],
                     "correlation_id": correlation_id
                 }))
-
             approved_trade_message = {
                 "symbol": signal["symbol"],
                 "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -170,7 +168,6 @@ def on_message_callback(channel, method_frame, header_frame, body):
         channel.basic_nack(delivery_tag=method_frame.delivery_tag, requeue=False)
 
 def main():
-    import sys
     if len(sys.argv) > 1 and sys.argv[1] == "consume":
         consume_trade_signals()
     else:
@@ -187,7 +184,8 @@ def main():
         }
         correlation_id = "abc123"
         process_trade_signal(sample_signal, correlation_id=correlation_id)
-        from reporting import generate_daily_risk_report
+        # Use a relative import for reporting.
+        from .reporting import generate_daily_risk_report
         report = generate_daily_risk_report(portfolio_data)
         logger.info(json.dumps({
             "timestamp": datetime.now(timezone.utc).isoformat(),

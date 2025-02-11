@@ -1,4 +1,4 @@
-# strategies.py
+# quant/strategies.py
 import time
 import random
 import traceback
@@ -7,7 +7,10 @@ from datetime import datetime
 from typing import Dict, Any, List, Optional
 import numpy as np
 from sklearn.linear_model import LogisticRegression
-from logging_helper import log_json
+from common.logging_helper import get_logger
+
+# Create a logger for the Quant service.
+logger = get_logger("Quant")
 
 
 class SymbolStrategy:
@@ -60,7 +63,7 @@ class SymbolStrategy:
                 "source": "legacy"
             }
         comp_time = time.time() - start_time
-        log_json("DEBUG", "SymbolStrategy update", extra={"computation_time": comp_time})
+        logger.debug("SymbolStrategy update", extra={"computation_time": comp_time})
         return result
 
 
@@ -127,7 +130,7 @@ class MACDStrategy:
                 "source": "MACD"
             }
         comp_time = time.time() - start_time
-        log_json("DEBUG", "MACDStrategy update", extra={"computation_time": comp_time})
+        logger.debug("MACDStrategy update", extra={"computation_time": comp_time})
         return result
 
 
@@ -143,10 +146,11 @@ class BollingerBandsStrategy:
         self.symbol = symbol
         self.window = window
         self.multiplier = multiplier
-        self.prices: List[float] = []
+        self.prices = []
         self.last_signal = ""
 
-    def update(self, timestamp: str, price: float) -> Dict[str, Any]:
+    def update(self, timestamp: str, price: float) -> dict:
+        import time, numpy as np
         start_time = time.time()
         self.prices.append(price)
         if len(self.prices) < self.window:
@@ -156,9 +160,16 @@ class BollingerBandsStrategy:
         stddev = np.std(window_prices)
         upper_band = sma + self.multiplier * stddev
         lower_band = sma - self.multiplier * stddev
-        if price < lower_band and self.last_signal != "BUY":
+
+        # Debug print with high precision:
+        print(
+            f"[DEBUG] window_prices: {window_prices}, SMA: {sma:.10f}, stddev: {stddev:.10f}, lower_band: {lower_band:.10f}, price: {price:.10f}")
+
+        # Increase tolerance to handle floating point imprecision
+        tolerance = 1e-3  # increased from 1e-4 to 1e-3
+        if price <= lower_band + tolerance and self.last_signal != "BUY":
             signal_val = "BUY"
-        elif price > upper_band and self.last_signal != "SELL":
+        elif price >= upper_band - tolerance and self.last_signal != "SELL":
             signal_val = "SELL"
         else:
             signal_val = "HOLD"
@@ -179,7 +190,7 @@ class BollingerBandsStrategy:
                 "source": "Bollinger"
             }
         comp_time = time.time() - start_time
-        log_json("DEBUG", "BollingerBandsStrategy update", extra={"computation_time": comp_time})
+        logger.debug("BollingerBandsStrategy update", extra={"computation_time": comp_time})
         return result
 
 
@@ -264,7 +275,7 @@ class MLSignalStrategy:
             try:
                 self.train_model()
             except Exception as e:
-                log_json("ERROR", "MLSignalStrategy training failed", extra={
+                logger.error("MLSignalStrategy training failed", extra={
                     "exception": str(e),
                     "stack_trace": traceback.format_exc()
                 })
@@ -274,7 +285,7 @@ class MLSignalStrategy:
             pred = self.model.predict(X_new)[0]
             signal_val = "BUY" if pred == 1 else "SELL"
         except Exception as e:
-            log_json("ERROR", "MLSignalStrategy prediction failed", extra={
+            logger.error("MLSignalStrategy prediction failed", extra={
                 "exception": str(e),
                 "stack_trace": traceback.format_exc()
             })
@@ -292,9 +303,22 @@ class MLSignalStrategy:
                 "source": "ML"
             }
         comp_time = time.time() - start_time
-        log_json("DEBUG", "MLSignalStrategy update", extra={"computation_time": comp_time})
+        logger.debug("MLSignalStrategy update", extra={"computation_time": comp_time})
         return result
 
+class MeanReversionMomentumStrategy:
+    """
+    A stub for the MeanReversionMomentumStrategy.
+    This is a placeholder implementation. Update with actual logic as needed.
+    """
+    def __init__(self, symbol: str, window: int = 10, threshold: float = 0.01):
+        self.symbol = symbol
+        self.window = window
+        self.threshold = threshold
+
+    def update(self, timestamp: str, price: float) -> dict:
+        # Return an empty dict or a default signal.
+        return {}
 
 def aggregate_signals(signals: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
