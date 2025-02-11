@@ -1,202 +1,180 @@
-StockAutoTrader is an automated stock trading application built as a set of asynchronous microservices, each with a focused responsibility: Dataflow (market data ingestion), Quant (signal generation), RiskOps (risk management), and ExecConnect (trade execution). The system uses RabbitMQ for inter-service communication and Docker for containerized deployment.
+StockAutoTrader is a production-ready, automated trading system built on a microservices architecture. The project integrates real-time market data, quantitative trading strategies, risk management, and order execution into a cohesive platform. Recent updates focus on enhanced observability, robust logging, and comprehensive testing to ensure reliability as new features are added.
 
 Table of Contents
-	1.	Overview
-	2.	Architecture
-	3.	Services
-	•	Dataflow
-	•	Quant
-	•	RiskOps
-	•	ExecConnect
-	4.	Setup & Installation
-	5.	Configuration
-	•	Environment Variables
-	•	Logging
-	6.	Running the System
-	7.	Testing
-	8.	Roadmap
-	9.	License
+	1.	Project Overview
+	2.	Key Features
+	3.	Repository Structure
+	4.	Getting Started
+	5.	Running the Application
+	6.	Running Tests
+	7.	Observability & Logging
+	8.	Contribution Guidelines
+	9.	Future Enhancements
+	10.	License and Acknowledgments
 
-Overview
+Project Overview
 
-StockAutoTrader aims to provide an end-to-end pipeline for automated trading:
-	•	Dataflow retrieves market data from Polygon and pushes it to RabbitMQ.
-	•	Quant consumes this data, applies trading strategies, and publishes signals.
-	•	RiskOps evaluates those signals against predefined risk thresholds.
-	•	ExecConnect executes approved trades on a broker API (or a simulated environment).
+StockAutoTrader is an automated trading platform designed to evolve seamlessly as new contributions are integrated. Built on a microservices paradigm, the project ensures that each service—data ingestion, trading strategy, risk management, and order execution—remains modular, maintainable, and independently testable. Our primary goals are to continuously enhance observability, maintain stability under integration, and foster an active contribution process.
 
-This design keeps components loosely coupled, scalable, and easier to maintain.
+Key Features
+	•	Real-Time Market Data Ingestion:
+	•	Integration with primary and secondary market data feeds.
+	•	Automatic failover to backup data sources when necessary.
+	•	Schema validation that supports both complete and partial data inputs.
+	•	Automated Trading Strategies (Quant):
+	•	Implementation of various quantitative strategies (e.g., MACD, Bollinger Bands, RSI, and ML-based signals).
+	•	Signal generation integrated into strategy classes for clarity and modularity.
+	•	Risk Management (RiskOps):
+	•	Pre-trade validations including exposure limits, margin requirements, and circuit breaker logic.
+	•	Dynamic portfolio updates based on trade signals.
+	•	Detailed risk reporting and performance metrics.
+	•	Order Execution (ExecConnect):
+	•	Robust order submission to broker APIs.
+	•	Handling for successful, failed, and partially filled orders.
+	•	Fallback logic to safely manage errors and exceptions.
+	•	Observability & Logging:
+	•	Centralized JSON logging across all microservices using a custom logging helper.
+	•	Propagation of correlation IDs for end-to-end traceability.
+	•	Integration with Prometheus for metrics collection and Grafana for dashboard visualization.
+	•	Optional OpenTelemetry stubs for future distributed tracing.
+	•	Testing Suite:
+	•	A comprehensive test suite covering unit, integration, and observability tests.
+	•	Automated tests are discoverable and runnable via a centralized test runner script.
 
-Architecture
+Repository Structure
 
-                   +------------+
-                   |  Dataflow  |
-                   |  (Polygon) |
-                   +-----+------+
-                         |
-                         | (market data)
-                         v
-+--------+       +---------------+       +-----------------+
-| Rabbit | <---- |   RabbitMQ    | ----> |  (PostgreSQL)   |
-|  MQ    |       +---------------+       +-----------------+
-+--------+
-                         ^
-                         | (signals, risk approvals...)
-+-----------+     +------+-------+    +-------------+
-|   Quant   | --> |  RiskOps     | -->| ExecConnect |
-|(Strategies|     |(Risk Checks) |    |(Trade Exec) |
-|(Signal Gen)     +--------------+    +-------------+
+StockAutoTrader/
+├── dataflow/             # Market data ingestion, API integrations, failover logic
+├── quant/                # Trading strategies and performance metrics
+│   ├── consumer.py
+│   ├── performance.py
+│   └── strategies.py
+├── riskops/              # Risk evaluation, trade processing, and portfolio updates
+├── execconnect/          # Order execution and broker API integration
+├── common/               # Shared utilities (e.g., logging_helper.py, telemetry stubs)
+├── tests/                # Test suite for the project
+│   ├── dataflow/         # Unit and integration tests for DataFlow
+│   ├── quant_tests/      # Tests for the Quant service (strategies, consumer, etc.)
+│   ├── riskops/          # Tests for risk evaluation and reporting
+│   └── execconnect/      # Tests for order execution and broker API simulation
+└── run_tests.py          # Centralized test runner script
 
-Each service is containerized and orchestrated through Docker Compose, allowing straightforward deployment and scaling.
+Getting Started
 
-Services
+Prerequisites
+	•	Python: Version 3.12 or later.
+	•	Dependencies:
+Install required libraries using pip (see the provided requirements.txt):
 
-Dataflow
-	•	Purpose: Fetch real-time or historical market data from the Polygon API and publish messages to RabbitMQ.
-	•	Key Files:
-	•	polygon_service.py: Connects to the Polygon API and handles retry logic.
-	•	rabbitmq_publisher.py: Publishes fetched data to RabbitMQ.
-	•	Features:
-	•	Exponential Backoff for network/API failures.
-	•	JSON-Structured Logging with timestamps, service name, and message content.
-	•	Fallback Mechanisms if API calls repeatedly fail.
+pip install -r requirements.txt
 
-Quant
-	•	Purpose: Receive and process market data to generate buy/sell signals based on custom strategies.
-	•	Key Files:
-	•	SymbolStrategy.py: Core signal generation logic (e.g., momentum, mean reversion).
-	•	publish_trade_signal.py: Publishes resulting trade signals to RabbitMQ for RiskOps.
-	•	Features:
-	•	Data Validation for required fields (symbol, price).
-	•	Exponential Backoff when publishing signals.
-	•	JSON-Structured Logging (e.g., warnings if volume or timestamp are missing).
 
-RiskOps
-	•	Purpose: Evaluate the signals from Quant to ensure they comply with risk parameters (confidence threshold, margin requirements, leverage limits, etc.).
-	•	Key Files:
-	•	risk.py: Contains the core logic for position sizing, margin checks, and confidence rules.
-	•	mq_util.py: Handles RabbitMQ operations for subscribing to signals and publishing approvals/rejections.
-	•	Features:
-	•	JSON-Structured Logging with warnings/error levels on threshold breaches.
-	•	Configurable Parameters (confidence threshold, max leverage) from environment variables.
-	•	Unit Tests covering various risk scenarios.
+	•	Environment Variables:
+Configure the following environment variables:
+	•	POLYGON_API_KEY – API key for the primary market data feed.
+	•	SECONDARY_POLYGON_BASE_URL – URL for the secondary data feed.
+	•	RABBITMQ_HOST, RABBITMQ_USER, RABBITMQ_PASS – RabbitMQ connection parameters.
+	•	WATCHLIST – Comma-separated list of symbols (e.g., “AAPL,MSFT,GOOG,TSLA”).
+	•	DATA_INTERVAL – Market data interval (e.g., “1m”).
 
-ExecConnect
-	•	Purpose: Execute approved trades on a broker API or a simulated execution environment.
-	•	Key Files:
-	•	trade_executor.py: Orchestrates order preparation and submission logic.
-	•	broker_api.py: Abstracts connectivity/authentication to an external broker.
-	•	Features:
-	•	Exponential Backoff for broker/API call failures.
-	•	Structured Logging capturing order IDs, symbols, quantities, and outcomes (e.g., FILLED, REJECTED).
-	•	Risk Approval Check to ensure only trades validated by RiskOps are executed.
-
-Setup & Installation
-	1.	Clone the Repository
+Installation
+	1.	Clone the repository:
 
 git clone https://github.com/Solders-Girdles/StockAutoTrader.git
 cd StockAutoTrader
 
 
-	2.	Install Docker & Docker Compose
-	•	Ensure you have Docker Engine and Docker Compose installed on your system.
-	3.	Check Environment Variables
-	•	Copy or create a .env file in the project’s root directory.
-	•	Set variables like POLYGON_API_KEY, RABBITMQ_HOST, RABBITMQ_USER, RABBITMQ_PASS, etc.
-	4.	(Optional) Local Python Setup
-	•	If you choose not to use Docker, install dependencies manually in each service folder:
+	2.	Install dependencies:
 
-cd Dataflow
 pip install -r requirements.txt
-# repeat for other services...
 
-Configuration
+Running the Application
 
-Environment Variables
+Each microservice can be launched individually. For example:
+	•	DataFlow (Market Data Publisher):
 
-Below are commonly used environment variables (set them in a .env file or export them in your shell):
+python dataflow/main.py
 
-Variable	Description	Example
-POLYGON_API_KEY	API key for Polygon market data	your_polygon_key
-RABBITMQ_HOST	RabbitMQ server host	localhost or rabbitmq
-RABBITMQ_USER	RabbitMQ username	guest
-RABBITMQ_PASS	RabbitMQ password	guest
-BROKER_API_KEY	Broker API key (ExecConnect)	demo_broker_key
-BROKER_API_SECRET	Broker API secret (ExecConnect)	demo_broker_secret
-CONFIDENCE_THRESH	Minimum confidence for trade approval (RiskOps)	0.75
 
-Include other variables as needed for your environment.
+	•	Quant (Trading Strategies and Signal Generation):
+Ensure the Quant service is configured to subscribe to market data and generate signals.
+	•	RiskOps (Risk Evaluation):
+
+python riskops/main.py
+
+
+	•	ExecConnect (Order Execution):
+
+python execconnect/main.py
+
+
+
+All services are designed to interact via RabbitMQ and share configuration from common environment files.
+
+Running Tests
+
+A comprehensive test suite is provided to ensure system reliability. To run all tests, execute the test runner script from the project root:
+
+python run_tests.py
+
+This script:
+	•	Adds the project root to sys.path.
+	•	Discovers all test files in the tests/ directory (files matching test*.py).
+	•	Runs tests in verbose mode.
+	•	Exits with a nonzero code if any test fails.
+
+Observability & Logging
 
 Logging
-	•	All services log in JSON format, including keys like timestamp, service, level, and message.
-	•	Some services may also log a correlation_id for end-to-end tracing of specific trades or requests.
-	•	Logs can be aggregated via tools like the ELK stack, Splunk, or AWS CloudWatch.
+	•	Centralized Logging:
+A custom logging helper (common/logging_helper.py) formats logs as JSON and attaches critical metadata (e.g., service name, correlation ID).
+	•	Correlation IDs:
+Generated in the DataFlow service and propagated through the system to enable end-to-end traceability.
+	•	Example Log Output:
 
-Running the System
-	1.	Docker Compose
-	•	From the project root, run:
-
-docker-compose up --build
-
-
-	•	This starts all microservices, plus RabbitMQ (and PostgreSQL if configured).
-
-	2.	Manual Startup (without Docker)
-	•	In separate terminals or background processes, start each service:
-
-cd Dataflow
-python main.py
-
-cd ../Quant
-python main.py
-
-# ... repeat for RiskOps and ExecConnect
+{
+  "timestamp": "2025-02-11T05:20:47.121037+00:00",
+  "service": "Quant",
+  "level": "INFO",
+  "message": "Received event",
+  "correlation_id": "1234"
+}
 
 
-	•	Ensure RabbitMQ is running locally or configure each service to point to a remote RabbitMQ instance.
 
-	3.	Verification
-	•	Check each service’s logs to confirm successful connections, data publishing/subscribing, and trade executions.
+Metrics & Tracing
+	•	Prometheus Integration:
+Services expose key metrics (trade counts, order latency, queue depth) via Prometheus.
+	•	Grafana Dashboards:
+Pre-configured dashboards help visualize system health.
+	•	Distributed Tracing (Optional):
+OpenTelemetry stubs are available for future enhancement.
 
-Testing
+Contribution Guidelines
 
-Each microservice has its own tests. Run them as follows:
-	•	Dataflow:
+We welcome contributions! Please follow these guidelines:
+	•	Branching Strategy:
+Use feature branches (e.g., feature/observations) for new work and create pull requests with clear integration summaries.
+	•	Code Style:
+Adhere to our coding standards and ensure consistency, especially in logging and module structure.
+	•	Testing:
+All new features must be accompanied by unit and integration tests. Ensure your changes pass the test suite by running:
 
-cd Dataflow
-python -m unittest discover tests
+python run_tests.py
 
 
-	•	Quant:
+	•	Documentation:
+			Update relevant documentation (README, in-code comments, etc.) to reflect changes.
+Future Enhancements
 
-cd Quant
-python main.py test
+	•	Security Improvements:
+			Migrate sensitive configurations to a secure secrets store (e.g., Vault or AWS Secrets Manager).
 
-(Or run individual test files from the tests/ folder.)
+	•	Scalability:
+			Transition from Docker Compose to Kubernetes for orchestration and enable Horizontal Pod Autoscaling.
 
-	•	RiskOps:
+	•	Advanced Observability:
+			Expand distributed tracing capabilities using OpenTelemetry and enhance Prometheus metrics.
 
-cd RiskOps
-python -m unittest discover tests
-
-Includes tests for leverage, margin checks, and malformed signal scenarios.
-
-	•	ExecConnect:
-
-cd ExecConnect
-python -m unittest discover tests
-
-Mocks broker API responses and verifies partial fills, rejections, and timeouts.
-
-Setting up a CI/CD pipeline (e.g., GitHub Actions) is recommended to automate these tests on every commit or pull request.
-
-Roadmap
-	•	Correlation ID Standardization: Ensure each service logs and propagates a correlation_id across the entire workflow.
-	•	Advanced Order Types: Extend ExecConnect to handle limit, stop-loss, and other order types.
-	•	Performance Monitoring: Integrate metrics dashboards (Prometheus + Grafana or similar) for real-time insights.
-	•	Dynamic Risk Models: Expand RiskOps to use volatility or portfolio-level metrics for position sizing and leverage.
-	•	CI/CD Integration: Automate build, test, and deployment steps for robust continuous delivery.
-
-License
-
-This project is released under the MIT License. Refer to the LICENSE file for details.
+	•		Strategy Expansion:
+				Explore additional quantitative strategies and machine learning-based signals for improved trade decisions.

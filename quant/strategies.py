@@ -1,4 +1,4 @@
-# quant/strategies.py
+# quant_tests/strategies.py
 import time
 import random
 import traceback

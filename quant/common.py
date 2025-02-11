@@ -1,4 +1,4 @@
-# quant/common.py
+# quant_tests/common.py
 import os
 import json
 import time

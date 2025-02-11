@@ -1,9 +1,9 @@
 # test_quant.py
-import sys
 import os
-
-# Add the project root to sys.path so that modules in the project root and the quant package are discoverable.
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../../')))
+import sys
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../"))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 
 import unittest
 import json
@@ -114,7 +114,7 @@ class TestPerformanceTracker(unittest.TestCase):
         self.assertIn("advanced_metrics", summary)
 
 
-# --- Tests for quant.strategies ---
+# --- Tests for quant_tests.strategies ---
 class TestStrategies(unittest.TestCase):
     def test_symbol_strategy_buy(self):
         """

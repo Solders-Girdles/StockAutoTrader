@@ -1,5 +1,14 @@
+import os
+import sys
+
+# Compute the project root: two levels up from the tests/quant_tests directory.
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../"))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 import unittest
-from quant import .signal_generator
+import quant.strategies as strategies
+# or, if you need a specific function or class:
+from quant.strategies import SymbolStrategy
 
 
 class TestSignalGeneration(unittest.TestCase):
