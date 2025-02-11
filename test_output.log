@@ -1,0 +1,16 @@
+/Users/rj/PycharmProjects/StockAutoTrader/./integration_test.py:62: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+  "timestamp": datetime.utcnow().isoformat() + "Z"
+/Users/rj/PycharmProjects/StockAutoTrader/./integration_test.py:33: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+  "time": datetime.utcnow().isoformat() + "Z",
+{"time": "2025-02-08T06:35:47.285941Z", "level": "INFO", "message": "Market data fetched: {'symbol': 'AAPL', 'price': 156.82, 'timestamp': '2025-02-08T06:35:47.285680Z'}"}
+/Users/rj/PycharmProjects/StockAutoTrader/./integration_test.py:80: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+  "timestamp": datetime.utcnow().isoformat() + "Z",
+{"time": "2025-02-08T06:35:47.286002Z", "level": "INFO", "message": "Trade signal computed: {'symbol': 'AAPL', 'timestamp': '2025-02-08T06:35:47.285981Z', 'signal_type': 'SELL', 'price': 156.82, 'confidence': 0.94}"}
+{"time": "2025-02-08T06:35:47.286028Z", "level": "INFO", "message": "Risk evaluation passed: Portfolio updated with SELL order for AAPL at 156.82"}
+/Users/rj/PycharmProjects/StockAutoTrader/./integration_test.py:128: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+  execution_time = datetime.utcnow().isoformat() + "Z"
+{"time": "2025-02-08T06:35:47.286074Z", "level": "INFO", "message": "Trade executed: {'trade_id': '4acb5e20-93ed-4221-ace1-e2665e1abd16', 'status': 'SUCCESS', 'execution_time': '2025-02-08T06:35:47.286063Z', 'symbol': 'AAPL', 'signal_type': 'SELL', 'price': 156.82}"}
+{"time": "2025-02-08T06:35:47.286093Z", "level": "INFO", "message": "Final trade execution details: {'trade_id': '4acb5e20-93ed-4221-ace1-e2665e1abd16', 'status': 'SUCCESS', 'execution_time': '2025-02-08T06:35:47.286063Z', 'symbol': 'AAPL', 'signal_type': 'SELL', 'price': 156.82}"}
+{"time": "2025-02-08T06:35:47.286107Z", "level": "INFO", "message": "Cleaning up resources."}
+{"time": "2025-02-08T06:35:47.286119Z", "level": "INFO", "message": "Test Summary:"}
+{"time": "2025-02-08T06:35:47.286155Z", "level": "INFO", "message": "{\n  \"market_data_fetched\": true,\n  \"trade_signal_computed\": true,\n  \"risk_evaluation\": {\n    \"approved\": true,\n    \"message\": \"Portfolio updated with SELL order for AAPL at 156.82\"\n  },\n  \"trade_execution\": {\n    \"trade_id\": \"4acb5e20-93ed-4221-ace1-e2665e1abd16\",\n    \"status\": \"SUCCESS\",\n    \"execution_time\": \"2025-02-08T06:35:47.286063Z\",\n    \"symbol\": \"AAPL\",\n    \"signal_type\": \"SELL\",\n    \"price\": 156.82\n  },\n  \"final_outcome\": \"Success\"\n}"}
