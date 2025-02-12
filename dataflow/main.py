@@ -412,7 +412,7 @@ def main_publisher():
     logger.info("Started Prometheus metrics server on port 8000")
 
     primary_service = PolygonService("d5Wst8dKFQRQ8yTJpsPiV1a9wzHzwF4K")
-    secondary_service = SecondaryPolygonService(api_key=POLYGON_API_KEY, base_url=SECONDARY_POLYGON_BASE_URL)
+    secondary_service = SecondaryPolygonService(api_key="SpxTa5t3VR9J1sXVW1vxfjnGafcSxe4g", base_url=SECONDARY_POLYGON_BASE_URL)
     publisher = RabbitMQPublisher(host=RABBITMQ_HOST, user=RABBITMQ_USER, password=RABBITMQ_PASS, queue="market_data")
 
     def process_symbol(symbol: str):
